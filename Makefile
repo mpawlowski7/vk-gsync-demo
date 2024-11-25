@@ -1,9 +1,9 @@
 CC = gcc
 LD = $(CC)
-CFLAGS += -Wall -O3 -std=c99
-LDFLAGS += -lXNVCtrl -lX11 -lXext -lGL -lGLU -lglut -lGLEW -lm
+CFLAGS += -Wall -O3 -std=c11
+LDFLAGS += -lXNVCtrl -lX11 -lXext -lvulkan -lglut -lSDL2  -lm
 
-TARGETS = gl-gsync-demo
+TARGETS = vk-gsync-demo
 
 .PHONY: default
 default: $(TARGETS)
@@ -12,9 +12,10 @@ default: $(TARGETS)
 clean:
 	-rm -rf *.o core.* *~ $(TARGETS)
 
-gl-gsync-demo: main.o gsync.o vsync.o
+vk-gsync-demo: main.o gsync.o vsync.o vulkan.o
 	$(LD) $^ $(LDFLAGS) -o $@
 
 main.o: main.c gsync.h vsync.h
 gsync.o: gsync.c gsync.h
 vsync.o: vsync.c vsync.h
+vulkan.o: vulkan.c vulkan.h

@@ -1,10 +1,10 @@
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-#include <stdbool.h>
+//#include <stdlib.h>
 #include <math.h>
-#include <GL/glew.h>
+
+// #include <GL/glew.h>
 #include <GL/freeglut.h>
+#include <SDL2/SDL.h>
+#include "vulkan.h"
 
 #include "gsync.h"
 #include "vsync.h"
@@ -114,7 +114,7 @@ struct Application
   struct VSyncController vsyncController;
 
   int animationSpeed;
-
+  SDL_Window *g_mainWindow;
 } app;
 
 void initializeApplication(struct Application *app)
@@ -128,7 +128,9 @@ void initializeApplication(struct Application *app)
   vsyncInitialize(&app->vsyncController);
 
   /* OpenGL initialization */
+#ifdef USE_OPENGL
   glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
+#endif
 }
 
 void toggleGSync(struct Application *app)
@@ -141,6 +143,7 @@ void toggleVSync(struct Application *app)
   vsyncSetEnabled(&app->vsyncController, !vsyncIsEnabled(&app->vsyncController));
 }
 
+#ifdef USE_OPENGL
 int printText(const char *format, ...)
 {
   char buffer[1024];
@@ -404,6 +407,8 @@ void specialKeyPress(int key, int x, int y)
   }
 }
 
+#endif
+
 int main(int argc, char *argv[])
 {
   gsyncInitialize(&app.gsyncController);
@@ -414,6 +419,61 @@ int main(int argc, char *argv[])
   gsyncShowVisualIndicator(&app.gsyncController, true);
   gsyncShowVisualIndicator(&app.gsyncController, true);
 
+  SDL_Init(SDL_INIT_VIDEO);
+  app.g_mainWindow = SDL_CreateWindow("vk-gsync-demo", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 3840, 2160, SDL_WINDOW_VULKAN);
+  if (app.g_mainWindow == NULL) {
+    printf("Failed to create SDL_Window. Exiting app.\n");
+    return -1;
+  }
+
+  SDL_SetWindowFullscreen(app.g_mainWindow, SDL_WINDOW_FULLSCREEN);
+
+  SDL_DisplayMode mode = { };
+  mode.w            = 3840;
+  mode.h            = 2160;
+  mode.refresh_rate = 144;
+  // TODO: Implement lookup format for bitsPerPixel here.
+
+
+  if (SDL_SetWindowDisplayMode(app.g_mainWindow, &mode) != 0) {
+    printf("SDL_SetWindowDisplayMode = %s", SDL_GetError());
+    return false;
+  }
+
+  SDL_ShowWindow(app.g_mainWindow);
+
+  if (!InitializeVulkan(app.g_mainWindow)) {
+    printf("Failed to initialize Vulkan. Exiting app.\n");
+    return -1;
+  };
+
+  bool running = true;
+  while(running) {
+    SDL_Event event;
+    while(SDL_PollEvent(&event))
+      switch (event.type) {
+        case SDL_QUIT:
+          running = false;
+          break;
+        case SDL_KEYUP:
+          if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE
+              || event.key.keysym.scancode == SDL_SCANCODE_Q) {
+            running = false;
+            printf("Exiting\n");
+          }
+          break;
+        default:
+          break;
+      }
+    Draw();
+  }
+
+  CleanupVulkan();
+
+  SDL_DestroyWindow(app.g_mainWindow);
+  SDL_Quit();
+
+#ifdef USE_OPENGL
   /* Initialize GLUT */
   glutInit(&argc, argv);
   glutSetOption(GLUT_ACTION_ON_WINDOW_CLOSE, GLUT_ACTION_GLUTMAINLOOP_RETURNS);
@@ -439,7 +499,7 @@ int main(int argc, char *argv[])
   glutMainLoop();
 
   glutExit();
-
+#endif
   gsyncFinalize(&app.gsyncController);
 
   return 0;

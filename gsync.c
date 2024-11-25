@@ -1,5 +1,5 @@
 #include <stdio.h>
-#include <GL/glxew.h>
+// #include <GL/glxew.h>
 #include <NVCtrl/NVCtrl.h>
 #include <NVCtrl/NVCtrlLib.h>
 
@@ -49,6 +49,7 @@ int gsyncInitialize(struct GSyncController *controller)
   controller->initialGSYNCValue = gsyncIsAllowed(controller);
   controller->initialGSYNCVisualIndicatorValue = gsyncIsVisualIndicatorShown(controller);
 
+  printf("gsync = %s\n", controller->initialGSYNCValue ? "true" : "false");
   return 1;
 }
 
