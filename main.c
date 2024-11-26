@@ -432,8 +432,6 @@ int main(int argc, char *argv[])
   mode.w            = 3840;
   mode.h            = 2160;
   mode.refresh_rate = 144;
-  // TODO: Implement lookup format for bitsPerPixel here.
-
 
   if (SDL_SetWindowDisplayMode(app.g_mainWindow, &mode) != 0) {
     printf("SDL_SetWindowDisplayMode = %s", SDL_GetError());

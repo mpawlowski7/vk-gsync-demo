@@ -23,6 +23,8 @@ static VkPhysicalDeviceMemoryProperties  g_physicalDeviceMemoryProperties;
 static VkQueueFamilyProperties          *g_queueFamilyProperties;
 static VkDevice                          g_device;
 static VkQueue                           g_presentQueue;
+static VkCommandPool                     g_commandPool;
+static VkCommandBuffer                   g_cmdBufferDraw;
 
 static VkSurfaceKHR                      g_surface;
 static VkSwapchainKHR                    g_swapchain;
@@ -33,21 +35,25 @@ static VkImage                          *g_swapchainImages;
 static VkImageView                      *g_colorImageViews;
 static uint32_t                          g_swapchainImageCount;
 
-static VkCommandPool                     g_commandPool;
-static VkCommandBuffer                   g_cmdBufferDraw;
-
 static VkRenderPass                      g_renderPass;
 static VkFramebuffer                    *g_framebuffers;
 static VkFence                           g_renderFence;
 static VkSemaphore                       g_renderSemaphore, g_presentSemaphore;
 
+static VkPipelineLayout                  g_pipelineLayout;
+static VkPipeline                        g_pipeline;
+
+typedef struct Position_t {
+  float x;
+} Position;
+
+static Position delta = { 0.0f };
 
 // Config
 //
 #ifdef VULKAN_DEBUG
 static const char **g_enabledValidationLayers = {};
 #endif
-
 
 // Function declaration
 //
@@ -57,7 +63,6 @@ static PFN_vkCreateDebugReportCallbackEXT SDL2_vkCreateDebugReportCallbackEXT;
 
 // ------ Helper functions -----
 //
-
 static SDL_bool getMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties, uint32_t *pMemoryTypeIndex)
 {
   for (uint32_t i = 0; i < g_physicalDeviceMemoryProperties.memoryTypeCount; i++) {
@@ -67,12 +72,40 @@ static SDL_bool getMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags propert
       return SDL_TRUE;
     }
   }
-
   return SDL_FALSE;
 }
 
-static const char* rectangeVertCode = "";
-static const char* rectangeFragCode = "";
+static SDL_bool prepareShaderModule(const char* shaderBinPath, VkShaderModule *pShaderModule)
+{
+  FILE *shaderFile = fopen(shaderBinPath, "rb");
+  if (shaderFile == NULL) {
+    printf("Failed to open shader file %s\n", shaderBinPath);
+    return SDL_FALSE;
+  }
+
+  fseek(shaderFile, 0, SEEK_END);
+  uint32_t shaderBinSize = ftell(shaderFile);
+  fseek(shaderFile, 0, SEEK_SET);
+
+  uint32_t* shaderCode = malloc(shaderBinSize);
+  fread(shaderCode, shaderBinSize, 1, shaderFile);
+  fclose(shaderFile);
+
+  VkShaderModuleCreateInfo shaderInfo = {};
+  shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+  shaderInfo.codeSize = shaderBinSize;
+  shaderInfo.pCode = shaderCode;
+
+  VkResult result = vkCreateShaderModule(g_device, &shaderInfo, VK_NULL_HANDLE, pShaderModule);
+  if (result != VK_SUCCESS) {
+    printf("Failed to create shader module %s\n", shaderBinPath);
+    free(shaderCode);
+    return SDL_FALSE;
+  }
+
+  free(shaderCode);
+  return SDL_TRUE;
+}
 
 // ------ Private API ----------
 //
@@ -453,27 +486,144 @@ SDL_bool createPipeline()
 {
   printf("%s called\n", __func__);
 
+  VkResult result;
+
+  VkShaderModule vertShaderModule;
+  prepareShaderModule("./rectangle.vert.spv", &vertShaderModule);
+
+  VkShaderModule fragShaderModule;
+  prepareShaderModule("./rectangle.frag.spv", &fragShaderModule);
+
+  VkPipelineShaderStageCreateInfo vertShaderStageInfo = {};
+  vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+  vertShaderStageInfo.module = vertShaderModule;
+  vertShaderStageInfo.pName = "main";
+
+  VkPipelineShaderStageCreateInfo fragShaderStageInfo = {};
+  fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  fragShaderStageInfo.module = fragShaderModule;
+  fragShaderStageInfo.pName = "main";
+
+  VkPipelineShaderStageCreateInfo shaderStages[] =  {
+    vertShaderStageInfo,
+    fragShaderStageInfo
+  };
+
   VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
   vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  vertexInputInfo.vertexBindingDescriptionCount = 0;
+  vertexInputInfo.vertexAttributeDescriptionCount = 0;
 
   VkPipelineInputAssemblyStateCreateInfo inputAssemblyInfo = {};
+  inputAssemblyInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  inputAssemblyInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  inputAssemblyInfo.primitiveRestartEnable = VK_FALSE;
 
-  VkShaderModule rectangleVertex;
+  // Static viewport and scissors
+  VkViewport viewport = {};
+  viewport.x = 0.0f;
+  viewport.y = 0.0f;
+  viewport.width = (float) g_swapchainExtent.width;
+  viewport.height = (float) g_swapchainExtent.height;
+  viewport.minDepth = 0.0f;
+  viewport.maxDepth = 1.0f;
 
-  VkShaderModuleCreateInfo shaderModuleInfo = {};
-  shaderModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-  shaderModuleInfo.codeSize = sizeof(VkShaderModule);
-  shaderModuleInfo.flags = VK_SHADER_STAGE_VERTEX_BIT;
+  VkRect2D scissor = {};
+  scissor.extent = g_swapchainExtent;
 
-  vkCreateShaderModule(g_device, &shaderModuleInfo, VK_NULL_HANDLE, &rectangleVertex);
+  VkPipelineViewportStateCreateInfo viewportInfo = {};
+  viewportInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewportInfo.viewportCount = 1;
+  viewportInfo.pViewports = &viewport;
+  viewportInfo.scissorCount = 1;
+  viewportInfo.pScissors = &scissor;
 
-  VkShaderModule rectangleCompose;
+  VkPipelineRasterizationStateCreateInfo rasterizerInfo = {};
+  rasterizerInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  rasterizerInfo.depthClampEnable = VK_FALSE;
+  rasterizerInfo.rasterizerDiscardEnable = VK_FALSE;
+  rasterizerInfo.polygonMode = VK_POLYGON_MODE_FILL;
+  rasterizerInfo.lineWidth = 1.0f;
+  rasterizerInfo.cullMode = VK_CULL_MODE_NONE;
+  rasterizerInfo.frontFace = VK_FRONT_FACE_CLOCKWISE;
+  rasterizerInfo.depthBiasEnable = VK_FALSE;
 
-  return SDL_TRUE;
+  VkPipelineMultisampleStateCreateInfo multisamplingInfo = {};
+  multisamplingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisamplingInfo.sampleShadingEnable = VK_FALSE;
+  multisamplingInfo.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+  VkPipelineColorBlendAttachmentState colorBlendingAttachment = {};
+  colorBlendingAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  colorBlendingAttachment.blendEnable = VK_FALSE;
+
+  VkPipelineColorBlendStateCreateInfo colorBlendingInfo = {};
+  colorBlendingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  colorBlendingInfo.logicOpEnable = VK_FALSE;
+  colorBlendingInfo.attachmentCount = 1;
+  colorBlendingInfo.pAttachments = &colorBlendingAttachment;
+
+  VkPushConstantRange pushConstant = {};
+  pushConstant.offset = 0;
+  pushConstant.size = sizeof(Position);
+  pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+  VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+  pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  pipelineLayoutInfo.setLayoutCount = 0;
+  pipelineLayoutInfo.pPushConstantRanges = &pushConstant;
+  pipelineLayoutInfo.pushConstantRangeCount = 1;
+
+  result = vkCreatePipelineLayout(g_device, &pipelineLayoutInfo, VK_NULL_HANDLE, &g_pipelineLayout);
+  if (result != VK_SUCCESS) {
+    printf("failed to create pipeline layout!");
+    vkDestroyShaderModule(g_device, fragShaderModule, VK_NULL_HANDLE);
+    vkDestroyShaderModule(g_device, vertShaderModule, VK_NULL_HANDLE);
+    return SDL_FALSE;
+  }
+
+  VkGraphicsPipelineCreateInfo pipelineInfo = {};
+  pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  pipelineInfo.stageCount = sizeof(shaderStages) / (sizeof(*shaderStages));
+  pipelineInfo.pStages = shaderStages;
+  pipelineInfo.pVertexInputState = &vertexInputInfo;
+  pipelineInfo.pInputAssemblyState = &inputAssemblyInfo;
+  pipelineInfo.pViewportState = &viewportInfo;
+  pipelineInfo.pRasterizationState = &rasterizerInfo;
+  pipelineInfo.pMultisampleState = &multisamplingInfo;
+  pipelineInfo.pColorBlendState = &colorBlendingInfo;
+  pipelineInfo.pDynamicState = VK_NULL_HANDLE;
+  pipelineInfo.layout = g_pipelineLayout;
+  pipelineInfo.renderPass = g_renderPass;
+  pipelineInfo.subpass = 0;
+  pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+  result = vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &pipelineInfo, VK_NULL_HANDLE, &g_pipeline);
+  if (result != VK_SUCCESS) {
+    printf("failed to create pipeline layout!");
+    vkDestroyShaderModule(g_device, fragShaderModule, VK_NULL_HANDLE);
+    vkDestroyShaderModule(g_device, vertShaderModule, VK_NULL_HANDLE);
+    return SDL_FALSE;
+  }
+
+  vkDestroyShaderModule(g_device, fragShaderModule, VK_NULL_HANDLE);
+  vkDestroyShaderModule(g_device, vertShaderModule, VK_NULL_HANDLE);
+
+  return result == VK_SUCCESS ? SDL_TRUE : SDL_FALSE;
 }
 
 SDL_bool drawRectangle()
 {
+  vkCmdBindPipeline(g_cmdBufferDraw, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pipeline);
+
+  vkCmdPushConstants(g_cmdBufferDraw, g_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Position), &delta);
+  vkCmdDraw(g_cmdBufferDraw, 6, 1, 0, 0);
+
+  delta.x += 0.01;
+    if (delta.x >= 2.0f) { delta.x = 0.0f; }
+
   return SDL_TRUE;
 }
 
@@ -501,9 +651,9 @@ SDL_bool InitializeVulkan(SDL_Window *appWindow)
     return SDL_FALSE;
   }
 
-  /*if (!createPipeline()) {
+  if (!createPipeline()) {
     return SDL_FALSE;
-  }*/
+  }
 
   if (!createFramebuffers()) {
     return SDL_FALSE;
@@ -557,7 +707,7 @@ void Draw()
 
     vkCmdBeginRenderPass(g_cmdBufferDraw, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-    // drawRectangle()
+    drawRectangle();
 
     vkCmdEndRenderPass(g_cmdBufferDraw);
   }
@@ -596,6 +746,7 @@ void Draw()
     vkQueuePresentKHR(g_presentQueue, &presentInfo);
   }
 
+  // Temp framelimiter;
   struct timespec ts;
   ts.tv_sec = 0;
   ts.tv_nsec = 16600000L;
