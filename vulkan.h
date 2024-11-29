@@ -1,13 +1,12 @@
-//
-// Created by mipw on 08.07.24.
-//
-
 #ifndef VULKAN_H
 #define VULKAN_H
 
-#include <SDL2/SDL_vulkan.h>
+#define APP_NAME "vk-gsync-demo"
 
-SDL_bool InitializeVulkan(SDL_Window* appWindow);
+#include <SDL2/SDL_vulkan.h>
+#include <vulkan/vulkan.h>
+
+SDL_bool InitializeVulkan(SDL_Window* pWindowHandle, int width, int height);
 void Update();
 void Draw();
 void CleanupVulkan();

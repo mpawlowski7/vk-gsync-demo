@@ -1,7 +1,7 @@
 CC = gcc
 LD = $(CC)
 CFLAGS += -Wall -O3 -std=c11
-LDFLAGS += -lXNVCtrl -lX11 -lXext -lvulkan -lglut -lSDL2  -lm
+LDFLAGS += -lXNVCtrl -lX11 -lvulkan -lSDL2  -lm
 
 TARGETS = vk-gsync-demo
 

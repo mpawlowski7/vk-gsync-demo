@@ -1,8 +1,5 @@
-//#include <stdlib.h>
 #include <math.h>
 
-// #include <GL/glew.h>
-#include <GL/freeglut.h>
 #include <SDL2/SDL.h>
 #include "vulkan.h"
 
@@ -30,7 +27,7 @@ void initializeClock(struct Clock *clock)
 void updateClock(struct Clock *clock)
 {
   clock->lastTimeSec = clock->currentTimeSec;
-  clock->currentTimeSec = (double)glutGet(GLUT_ELAPSED_TIME) * 0.001f;
+  // clock->currentTimeSec = (double)glutGet(GLUT_ELAPSED_TIME) * 0.001f;
   clock->deltaSec = clock->currentTimeSec - clock->lastTimeSec;
 }
 
@@ -62,7 +59,7 @@ void initializeFrameRateController(struct FrameRateController *frameRateControll
 {
   frameRateController->frameRateFloor = 10;
   frameRateController->frameRateMin = 30;
-  frameRateController->frameRateMax = max(60, glutGameModeGet(GLUT_GAME_MODE_REFRESH_RATE));
+  frameRateController->frameRateMax = max(60, 144);
 }
 
 void increaseMinFrameRate(struct FrameRateController *frameRateController, int byNrOfFrames)
@@ -105,7 +102,7 @@ void computeNextFrameDelayMsec(struct FrameRateController *frameRateController, 
  * Application
  */
 
-struct Application
+typedef struct Application_t
 {
   struct Clock clock;
   struct FrameRateController frameRateController;
@@ -113,34 +110,50 @@ struct Application
   struct GSyncController gsyncController;
   struct VSyncController vsyncController;
 
-  int animationSpeed;
-  SDL_Window *g_mainWindow;
-} app;
+  int       animationSpeed;
+  SDL_bool  running;
 
-void initializeApplication(struct Application *app)
+  SDL_Window* pWindowHandle;
+} Application;
+
+static void toggleGSync(Application *app)
+{
+  gsyncSetAllowed(&app->gsyncController, !gsyncIsAllowed(&app->gsyncController));
+}
+
+static void toggleVSync(Application *app)
+{
+  vsyncSetEnabled(&app->vsyncController, !vsyncIsEnabled(&app->vsyncController));
+}
+
+static void initializeApplication(Application *app)
 {
   /* Application initialization */
   app->animationSpeed = 5;
+  app->running = false;
 
   initializeClock(&app->clock);
   initializeFrameRateController(&app->frameRateController);
 
   vsyncInitialize(&app->vsyncController);
 
-  /* OpenGL initialization */
-#ifdef USE_OPENGL
-  glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
-#endif
-}
+  SDL_Init(SDL_INIT_VIDEO);
+  SDL_DisplayMode displayMode;
+  SDL_GetCurrentDisplayMode(0, &displayMode);
 
-void toggleGSync(struct Application *app)
-{
-  gsyncSetAllowed(&app->gsyncController, !gsyncIsAllowed(&app->gsyncController));
-}
+  uint32_t windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN;
+  app->pWindowHandle = SDL_CreateWindow(APP_NAME, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                                                      displayMode.w, displayMode.h, windowFlags);
+  if (app->pWindowHandle == NULL) {
+    printf("Failed to create SDL_Window. Exiting app.\n");
+    return;
+  }
 
-void toggleVSync(struct Application *app)
-{
-  vsyncSetEnabled(&app->vsyncController, !vsyncIsEnabled(&app->vsyncController));
+  if (!InitializeVulkan(app->pWindowHandle, displayMode.w, displayMode.h)) {
+    printf("Failed to initialize Vulkan. Exiting app.\n");
+  };
+
+  app->running = true;
 }
 
 #ifdef USE_OPENGL
@@ -409,8 +422,38 @@ void specialKeyPress(int key, int x, int y)
 
 #endif
 
-int main(int argc, char *argv[])
+static void processEvents(Application* app)
 {
+  SDL_Event event;
+  while(SDL_PollEvent(&event))
+    switch (event.type) {
+      case SDL_QUIT:
+        app->running = false;
+      break;
+      case SDL_KEYUP:
+        if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE
+            || event.key.keysym.scancode == SDL_SCANCODE_Q) {
+          app->running = false;
+          printf("Exit app!\n");
+        }
+      break;
+      default:
+        break;
+    }
+}
+
+static void cleanupApplication(Application *app)
+{
+  CleanupVulkan();
+
+  SDL_DestroyWindow(app->pWindowHandle);
+  SDL_Quit();
+}
+
+int main(int, char**)
+{
+  Application app;
+
   gsyncInitialize(&app.gsyncController);
 
   /* Force G-SYNC Visual Indicator
@@ -419,86 +462,18 @@ int main(int argc, char *argv[])
   gsyncShowVisualIndicator(&app.gsyncController, true);
   gsyncShowVisualIndicator(&app.gsyncController, true);
 
-  SDL_Init(SDL_INIT_VIDEO);
-  app.g_mainWindow = SDL_CreateWindow("vk-gsync-demo", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 3840, 2160, SDL_WINDOW_VULKAN);
-  if (app.g_mainWindow == NULL) {
-    printf("Failed to create SDL_Window. Exiting app.\n");
-    return -1;
-  }
+  initializeApplication(&app);
 
-  SDL_SetWindowFullscreen(app.g_mainWindow, SDL_WINDOW_FULLSCREEN);
+  while(app.running) {
+    processEvents(&app);
 
-  SDL_DisplayMode mode = { };
-  mode.w            = 3840;
-  mode.h            = 2160;
-  mode.refresh_rate = 144;
-
-  if (SDL_SetWindowDisplayMode(app.g_mainWindow, &mode) != 0) {
-    printf("SDL_SetWindowDisplayMode = %s", SDL_GetError());
-    return false;
-  }
-
-  SDL_ShowWindow(app.g_mainWindow);
-
-  if (!InitializeVulkan(app.g_mainWindow)) {
-    printf("Failed to initialize Vulkan. Exiting app.\n");
-    return -1;
-  };
-
-  bool running = true;
-  while(running) {
-    SDL_Event event;
-    while(SDL_PollEvent(&event))
-      switch (event.type) {
-        case SDL_QUIT:
-          running = false;
-          break;
-        case SDL_KEYUP:
-          if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE
-              || event.key.keysym.scancode == SDL_SCANCODE_Q) {
-            running = false;
-            printf("Exiting\n");
-          }
-          break;
-        default:
-          break;
-      }
+    Update();
     Draw();
   }
 
-  CleanupVulkan();
-
-  SDL_DestroyWindow(app.g_mainWindow);
-  SDL_Quit();
-
-#ifdef USE_OPENGL
-  /* Initialize GLUT */
-  glutInit(&argc, argv);
-  glutSetOption(GLUT_ACTION_ON_WINDOW_CLOSE, GLUT_ACTION_GLUTMAINLOOP_RETURNS);
-
-  /* Create an OpenGL window */
-  glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
-  glutEnterGameMode();
-
-  glewInit();
-
-  /* Initialize application */
-  initializeApplication(&app);
-
-  /* Setup GLUT's callback functions */
-  glutReshapeFunc(reshape);
-  glutDisplayFunc(display);
-  glutKeyboardFunc(keyPress);
-  glutSpecialFunc(specialKeyPress);
-
-  glutTimerFunc(0, timerCallBack, 0);
-
-  /* Enter the main loop */
-  glutMainLoop();
-
-  glutExit();
-#endif
   gsyncFinalize(&app.gsyncController);
+
+  cleanupApplication(&app);
 
   return 0;
 }

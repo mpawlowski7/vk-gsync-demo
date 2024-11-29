@@ -2,7 +2,7 @@
 
 layout (location = 0) out vec3 outColor;
 
-// Draw rectangle with 5% screen width
+// Draw rectangle with 10% screen width
 const vec3 vertices[6] = vec3[6](
     vec3(-1.0,-1.0, 0.0),
     vec3(-1.0, 1.0, 0.0),

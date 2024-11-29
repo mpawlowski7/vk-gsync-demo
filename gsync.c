@@ -49,7 +49,6 @@ int gsyncInitialize(struct GSyncController *controller)
   controller->initialGSYNCValue = gsyncIsAllowed(controller);
   controller->initialGSYNCVisualIndicatorValue = gsyncIsVisualIndicatorShown(controller);
 
-  printf("gsync = %s\n", controller->initialGSYNCValue ? "true" : "false");
   return 1;
 }
 
@@ -119,12 +118,6 @@ bool gsyncIsVisualIndicatorShown(struct GSyncController *controller)
 
 void gsyncShowVisualIndicator(struct GSyncController *controller, bool enable)
 {
-  int value;
-
-  switch (enable) {
-  case false: value = NV_CTRL_SHOW_GSYNC_VISUAL_INDICATOR_FALSE; break;
-  case true:  value = NV_CTRL_SHOW_GSYNC_VISUAL_INDICATOR_TRUE;  break;
-  }
-
-  XNVCTRLSetAttribute(controller->dpy, 0, 0, NV_CTRL_SHOW_GSYNC_VISUAL_INDICATOR, value);
+  XNVCTRLSetAttribute(controller->dpy, 0, 0, NV_CTRL_SHOW_GSYNC_VISUAL_INDICATOR, enable);
+  XNVCTRLSetAttribute(controller->dpy, 0, 0, NV_CTRL_SHOW_GRAPHICS_VISUAL_INDICATOR, enable);
 }

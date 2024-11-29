@@ -2,18 +2,29 @@
 #define _GNU_SOURCE
 #endif
 
-#include "vulkan/vulkan.h"
-#include "SDL2/SDL_vulkan.h"
-
-#include <vulkan/vulkan_core.h>
+#include "vulkan.h"
+#include <X11/Xlib.h>
 
 #include <stdio.h>
 #include <time.h>
 
+#include "rectangle_frag.spv.h"
+#include "rectangle_vert.spv.h"
+
+#define USE_DIRECT_DISPLAY 0
+#define VULKAN_DEBUG 0
+
+#define VK_KHR_XLIB_SURFACE_EXTENSION_NAME         "VK_KHR_xlib_surface"
+#define VK_EXT_ACQUIRE_XLIB_DISPLAY_EXTENSION_NAME "VK_EXT_acquire_xlib_display"
+
+#if USE_DIRECT_DISPLAY
+typedef VkResult (VKAPI_PTR *PFN_vkAcquireXlibDisplayEXT)(VkPhysicalDevice physicalDevice, Display* dpy, VkDisplayKHR display);
+#endif
+
 // Global variables declaration
 //
 static VkInstance                        g_instance;
-#ifdef VULKAN_DEBUG
+#if VULKAN_DEBUG
 static VkDebugReportCallbackEXT          g_debugCallbackEXT;
 #endif
 static VkPhysicalDevice                  g_physicalDevice;
@@ -51,65 +62,59 @@ static Position delta = { 0.0f };
 
 // Config
 //
-#ifdef VULKAN_DEBUG
-static const char **g_enabledValidationLayers = {};
+#if VULKAN_DEBUG
+static const char* g_enabledValidationLayers[] = {
+  "VK_LAYER_KHRONOS_validation"
+};
 #endif
+
+const char* g_requiredInstanceExtensions[] = {
+  VK_KHR_SURFACE_EXTENSION_NAME,
+  VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
+#if USE_DIRECT_DISPLAY
+  VK_KHR_DISPLAY_EXTENSION_NAME,
+  VK_EXT_DIRECT_MODE_DISPLAY_EXTENSION_NAME,
+  VK_EXT_ACQUIRE_XLIB_DISPLAY_EXTENSION_NAME,
+#endif
+  VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
+};
+
+const char* g_requiredDeviceExtensions[] = {
+  VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+};
 
 // Function declaration
 //
-#ifdef VULKAN_DEBUG
+#if VULKAN_DEBUG
 static PFN_vkCreateDebugReportCallbackEXT SDL2_vkCreateDebugReportCallbackEXT;
 #endif
 
+#if USE_DIRECT_DISPLAY
+static PFN_vkAcquireXlibDisplayEXT pfn_vkAcquireXlibDisplayEXT = VK_NULL_HANDLE;
+#endif
+
+
 // ------ Helper functions -----
 //
-static SDL_bool getMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties, uint32_t *pMemoryTypeIndex)
+static SDL_bool prepareShaderModule(uint32_t* shaderBinary, int shaderSize, VkShaderModule *pShaderModule)
 {
-  for (uint32_t i = 0; i < g_physicalDeviceMemoryProperties.memoryTypeCount; i++) {
-    if ((typeFilter & (1 << i))
-        && (g_physicalDeviceMemoryProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-      *pMemoryTypeIndex = i;
-      return SDL_TRUE;
-    }
-  }
-  return SDL_FALSE;
-}
-
-static SDL_bool prepareShaderModule(const char* shaderBinPath, VkShaderModule *pShaderModule)
-{
-  FILE *shaderFile = fopen(shaderBinPath, "rb");
-  if (shaderFile == NULL) {
-    printf("Failed to open shader file %s\n", shaderBinPath);
-    return SDL_FALSE;
-  }
-
-  fseek(shaderFile, 0, SEEK_END);
-  uint32_t shaderBinSize = ftell(shaderFile);
-  fseek(shaderFile, 0, SEEK_SET);
-
-  uint32_t* shaderCode = malloc(shaderBinSize);
-  fread(shaderCode, shaderBinSize, 1, shaderFile);
-  fclose(shaderFile);
-
   VkShaderModuleCreateInfo shaderInfo = {};
   shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-  shaderInfo.codeSize = shaderBinSize;
-  shaderInfo.pCode = shaderCode;
+  shaderInfo.codeSize = shaderSize;
+  shaderInfo.pCode = shaderBinary;
 
   VkResult result = vkCreateShaderModule(g_device, &shaderInfo, VK_NULL_HANDLE, pShaderModule);
   if (result != VK_SUCCESS) {
-    printf("Failed to create shader module %s\n", shaderBinPath);
-    free(shaderCode);
+    printf("Failed to create shader module \n");
     return SDL_FALSE;
   }
 
-  free(shaderCode);
   return SDL_TRUE;
 }
 
 // ------ Private API ----------
 //
-#ifdef VULKAN_DEBUG
+#if VULKAN_DEBUG
 static VkBool32 VKAPI_CALL vulkanDebugCallback(
   VkDebugReportFlagsEXT flags,
   VkDebugReportObjectTypeEXT objectType,
@@ -134,23 +139,12 @@ static SDL_bool initVulkanCore(SDL_Window *appWindow)
     return SDL_FALSE;
   }
 
-  uint32_t extensionCount = 0;
-  SDL_Vulkan_GetInstanceExtensions(appWindow, &extensionCount, VK_NULL_HANDLE);
-
-  const char *extensionNames[extensionCount];
-  SDL_Vulkan_GetInstanceExtensions(appWindow, &extensionCount, extensionNames);
-
-  printf("Vulkan extensions count: %d\n", extensionCount);
-  for (int i = 0; i < extensionCount; i++) {
-    printf("%s\n", extensionNames[i]);
-  }
-
   VkApplicationInfo appInfo = {};
   appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
   appInfo.pNext = VK_NULL_HANDLE;
-  appInfo.pApplicationName = "vk-gsync-demo";
+  appInfo.pApplicationName = APP_NAME;
   appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-  appInfo.pEngineName = "DXVK";
+  appInfo.pEngineName = "vvv";
   appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
   appInfo.apiVersion = VK_API_VERSION_1_0;
 
@@ -158,12 +152,12 @@ static SDL_bool initVulkanCore(SDL_Window *appWindow)
   instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
   instanceInfo.pNext = VK_NULL_HANDLE;
   instanceInfo.pApplicationInfo = &appInfo;
-#ifdef VULKAN_DEBUG
+#if VULKAN_DEBUG
   instanceInfo.ppEnabledLayerNames = g_enabledValidationLayers;
 #endif
   instanceInfo.enabledLayerCount = 0;
-  instanceInfo.enabledExtensionCount = extensionCount;
-  instanceInfo.ppEnabledExtensionNames = extensionNames;
+  instanceInfo.enabledExtensionCount = sizeof(g_requiredInstanceExtensions)/sizeof(g_requiredInstanceExtensions[0]);
+  instanceInfo.ppEnabledExtensionNames = g_requiredInstanceExtensions;
 
   VkResult result = vkCreateInstance(&instanceInfo, VK_NULL_HANDLE, &g_instance);
   if (result != VK_SUCCESS) {
@@ -171,7 +165,7 @@ static SDL_bool initVulkanCore(SDL_Window *appWindow)
     return SDL_FALSE;
   }
 
-#ifdef VULKAN_DEBUG
+#if VULKAN_DEBUG
   SDL2_vkCreateDebugReportCallbackEXT = (PFN_vkCreateDebugReportCallbackEXT) SDL_Vulkan_GetVkGetInstanceProcAddr();
 
   VkDebugReportCallbackCreateInfoEXT debugCallbackCreateInfo = {};
@@ -179,8 +173,7 @@ static SDL_bool initVulkanCore(SDL_Window *appWindow)
   debugCallbackCreateInfo.flags = VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT;
   debugCallbackCreateInfo.pfnCallback = vulkanDebugCallback;
 
-   result = SDL2_vkCreateDebugReportCallbackEXT(*g_instance, &debugCallbackCreateInfo,
-                                             VK_NULL_HANDLE, &g_debugCallbackEXT);
+   result = SDL2_vkCreateDebugReportCallbackEXT(g_instance, &debugCallbackCreateInfo, VK_NULL_HANDLE, &g_debugCallbackEXT);
   if (result != VK_SUCCESS) {
     printf("Failed to create debug callback.\n");
     return SDL_FALSE;
@@ -211,6 +204,14 @@ static SDL_bool initVulkanCore(SDL_Window *appWindow)
   } else {
     return SDL_FALSE;
   }
+
+#if USE_DIRECT_DISPLAY
+  pfn_vkAcquireXlibDisplayEXT =  (PFN_vkAcquireXlibDisplayEXT) vkGetInstanceProcAddr(g_instance, "vkAcquireXlibDisplayEXT");
+  if (pfn_vkAcquireXlibDisplayEXT == VK_NULL_HANDLE) {
+    printf("Failed to load vkAcquireXlibDisplayEXT\n");
+    return SDL_FALSE;
+  }
+#endif
   return SDL_TRUE;
 }
 
@@ -235,7 +236,7 @@ SDL_bool initLogicalDevice()
   deviceInfo.flags = 0;
   deviceInfo.queueCreateInfoCount = 1;
   deviceInfo.pQueueCreateInfos = &queueInfo;
-#ifdef VULKAN_DEBUG
+#if VULKAN_DEBUG
   deviceInfo.enabledLayerCount = sizeof(g_enabledValidationLayers) / sizeof(*g_enabledValidationLayers);
   deviceInfo.ppEnabledLayerNames = g_enabledValidationLayers;
 #endif
@@ -251,33 +252,173 @@ SDL_bool initLogicalDevice()
   return SDL_TRUE;
 }
 
-SDL_bool initSwapchain(SDL_Window *window)
+SDL_bool initSwapchain(SDL_Window* pWindowHandle, int width, int height)
 {
   printf("%s called\n", __func__);
 
-  int width, height = 0;
-  SDL_Vulkan_CreateSurface(window, g_instance, &g_surface);
+  // Direct display surface
+#if USE_DIRECT_DISPLAY
+  {
+    Display* dpy = XOpenDisplay(0);
+    if (dpy == NULL) {
+      printf("Failed to open X display\n");
+      return 1;
+    } else {
+      printf("X display opened %p \n", dpy);
+    }
 
-  SDL_Vulkan_GetDrawableSize(window, &width, &height);
-  printf("SDL_Vulkan_GetDrawableSize() width = %d height = %d\n", width, height);
+    uint32_t displayCount;
+    vkGetPhysicalDeviceDisplayPropertiesKHR(g_physicalDevice, &displayCount, VK_NULL_HANDLE);
 
-  g_swapchainExtent.width = width;
-  g_swapchainExtent.height = height;
+    VkDisplayPropertiesKHR displayProperties[displayCount];
+    vkGetPhysicalDeviceDisplayPropertiesKHR(g_physicalDevice, &displayCount, displayProperties);
 
-  vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_physicalDevice, g_surface, &g_surfaceCapabilities);
+    printf( "Found displays = %d\n", displayCount);
+    for (int i=0; i < displayCount; i++) {
+      printf("\t[%d] %s \n", i, displayProperties[i].displayName);
+    }
+
+    VkDisplayKHR selectedDisplay = displayProperties[0].display;
+    VkResult result = pfn_vkAcquireXlibDisplayEXT(g_physicalDevice, dpy, selectedDisplay);
+    if (result != VK_SUCCESS) {
+      printf("Failed to acquire display result = %d \n", result);
+      return SDL_FALSE;
+    }
+
+    uint32_t displayModesCount = 0;
+    vkGetDisplayModePropertiesKHR(g_physicalDevice, selectedDisplay, &displayModesCount, VK_NULL_HANDLE);
+
+    VkDisplayModePropertiesKHR displayModeProperites[displayModesCount];
+    vkGetDisplayModePropertiesKHR(g_physicalDevice, selectedDisplay, &displayModesCount, displayModeProperites);
+
+    // Select the highest refresh rate and resolution
+    VkDisplayModePropertiesKHR selectedMode = displayModeProperites[0];
+    for (int i=0; i < displayModesCount; i++) {
+      VkExtent2D ires = displayModeProperites[i].parameters.visibleRegion;
+      uint32_t   ifreq = displayModeProperites[i].parameters.refreshRate;
+
+      VkExtent2D cres = selectedMode.parameters.visibleRegion;
+      uint32_t cfreq = selectedMode.parameters.refreshRate;
+
+      if(ires.height * ires.width + ifreq > cres.height * cres.width + cfreq ) {
+        selectedMode = displayModeProperites[i];
+      }
+    }
+
+    {
+      g_swapchainExtent.width = selectedMode.parameters.visibleRegion.width;
+      g_swapchainExtent.height = selectedMode.parameters.visibleRegion.height;
+      printf("g_swapchainExtent.width = %d, g_swapchainExtent.height = %d\n",
+        g_swapchainExtent.width, g_swapchainExtent.height);
+    }
+
+    uint32_t planePropertiesCount = 0;
+    vkGetPhysicalDeviceDisplayPlanePropertiesKHR(g_physicalDevice, &planePropertiesCount, VK_NULL_HANDLE);
+
+    VkDisplayPlanePropertiesKHR planeProperties[planePropertiesCount];
+    vkGetPhysicalDeviceDisplayPlanePropertiesKHR(g_physicalDevice, &planePropertiesCount, planeProperties);
+
+    uint32_t planeIndex;
+    SDL_bool foundPlane = SDL_FALSE;
+    for(uint32_t i = 0; i < planePropertiesCount; ++i) {
+      VkDisplayPlanePropertiesKHR property = planeProperties[i];
+
+      // skip planes bound to different display
+      if(property.currentDisplay && (property.currentDisplay != selectedDisplay)) {
+        continue;
+      }
+
+      uint32_t supportedDisplayCount = 0;
+      vkGetDisplayPlaneSupportedDisplaysKHR(g_physicalDevice, i, &supportedDisplayCount, VK_NULL_HANDLE);
+
+      VkDisplayKHR supportedDisplays[supportedDisplayCount];
+      vkGetDisplayPlaneSupportedDisplaysKHR(g_physicalDevice, i, &supportedDisplayCount, supportedDisplays);
+      for(int i = 0; i < supportedDisplayCount; i++) {
+        if(supportedDisplays[i] == selectedDisplay) {
+          foundPlane = SDL_TRUE;
+          planeIndex = i;
+          break;
+        }
+      }
+
+      if(foundPlane) {
+        break;
+      }
+    }
+
+    if(!foundPlane) {
+      printf("Could not find a compatible display plane!\n");
+      return SDL_FALSE;
+    }
+
+    // find alpha mode bit
+    VkDisplayPlaneCapabilitiesKHR planeCapabilites;
+    vkGetDisplayPlaneCapabilitiesKHR(g_physicalDevice, selectedMode.displayMode, planeIndex, &planeCapabilites);
+
+    VkDisplayPlaneAlphaFlagBitsKHR alphaMode = VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR;
+    VkDisplayPlaneAlphaFlagBitsKHR alphaModes[4] = {
+      VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR,
+      VK_DISPLAY_PLANE_ALPHA_GLOBAL_BIT_KHR,
+      VK_DISPLAY_PLANE_ALPHA_PER_PIXEL_BIT_KHR,
+      VK_DISPLAY_PLANE_ALPHA_PER_PIXEL_PREMULTIPLIED_BIT_KHR
+    };
+
+    for(uint32_t i = 0; i < 4; i++) {
+      if(planeCapabilites.supportedAlpha & alphaModes[i]) {
+        alphaMode = alphaModes[i];
+        break;
+      }
+    }
+
+    VkDisplaySurfaceCreateInfoKHR displaySurfaceInfo = {};
+    displaySurfaceInfo.sType = VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR;
+    displaySurfaceInfo.displayMode = selectedMode.displayMode;
+    displaySurfaceInfo.planeIndex = planeIndex;
+    displaySurfaceInfo.planeStackIndex = planeProperties[planeIndex].currentStackIndex;
+    displaySurfaceInfo.transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    displaySurfaceInfo.globalAlpha = 1.0f;
+    displaySurfaceInfo.alphaMode = alphaMode;
+    displaySurfaceInfo.imageExtent = g_swapchainExtent;
+
+    result = vkCreateDisplayPlaneSurfaceKHR(g_instance, &displaySurfaceInfo, VK_NULL_HANDLE, &g_surface);
+    if (result != VK_SUCCESS) {
+      printf("Failed to create display plane surface result = %d \n", result);
+      return SDL_FALSE;
+    }
+  }
+#else
+  // SDL surface
+  {
+    SDL_Vulkan_CreateSurface(pWindowHandle, g_instance, &g_surface);
+
+    g_swapchainExtent.width = width;
+    g_swapchainExtent.height = height;
+  }
+#endif
+   VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_physicalDevice, g_surface, &g_surfaceCapabilities);
+  if (result != VK_SUCCESS) {
+    printf("Failed to get surface capabilites = %d\n", result);
+    return SDL_FALSE;
+  }
 
   uint32_t surfaceFormatsCount;
   vkGetPhysicalDeviceSurfaceFormatsKHR(g_physicalDevice, g_surface, &surfaceFormatsCount, VK_NULL_HANDLE);
 
+  int surfaceFormatIndex = 0;
   VkSurfaceFormatKHR surfaceFormats[surfaceFormatsCount];
   vkGetPhysicalDeviceSurfaceFormatsKHR(g_physicalDevice, g_surface, &surfaceFormatsCount, surfaceFormats);
+  for (int i = 0; i < surfaceFormatsCount; i++) {
+    if (surfaceFormats[i].format == VK_FORMAT_B8G8R8A8_UNORM) {
+      surfaceFormatIndex = i;
+    }
+  }
 
-  if (surfaceFormats[0].format != VK_FORMAT_B8G8R8A8_UNORM) {
+  if (surfaceFormats[surfaceFormatIndex].format != VK_FORMAT_B8G8R8A8_UNORM) {
     printf("VK_FORMAT_B8G8R8A8_UNORM not supported\n");
     return SDL_FALSE;
   }
 
-  g_surfaceFormat = surfaceFormats[0];
+  g_surfaceFormat = surfaceFormats[surfaceFormatIndex];
 
   uint32_t imageCount = g_surfaceCapabilities.minImageCount + 1;
   if (g_surfaceCapabilities.maxImageCount > 0 && imageCount > g_surfaceCapabilities.maxImageCount) {
@@ -299,14 +440,13 @@ SDL_bool initSwapchain(SDL_Window *window)
   swapchainInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR; // V-SYNC -> expose to enable/disable
   swapchainInfo.clipped = VK_TRUE;
 
-  VkResult result = vkCreateSwapchainKHR(g_device, &swapchainInfo, VK_NULL_HANDLE, &g_swapchain);
+  result = vkCreateSwapchainKHR(g_device, &swapchainInfo, VK_NULL_HANDLE, &g_swapchain);
   if (result != VK_SUCCESS) {
-    printf("Failed to create swapchain\n");
+    printf("Failed to create swapchain result = %d\n", result);
     return SDL_FALSE;
   }
 
   vkGetSwapchainImagesKHR(g_device, g_swapchain, &g_swapchainImageCount, VK_NULL_HANDLE);
-  printf("Swapchain image count: %d\n", g_swapchainImageCount);
 
   g_swapchainImages = calloc(g_swapchainImageCount, sizeof(*g_swapchainImages));
   if (g_swapchainImages == VK_NULL_HANDLE) {
@@ -353,7 +493,7 @@ SDL_bool initSwapchain(SDL_Window *window)
 
 SDL_bool createRenderPass()
 {
-  printf("%s\n", __func__);
+  printf("%s called\n", __func__);
 
   // the renderpass will use this color attachment.
   VkAttachmentDescription colorAttachment = {};
@@ -489,10 +629,10 @@ SDL_bool createPipeline()
   VkResult result;
 
   VkShaderModule vertShaderModule;
-  prepareShaderModule("./rectangle.vert.spv", &vertShaderModule);
+  prepareShaderModule(rectangle_vert_spv, sizeof(rectangle_vert_spv), &vertShaderModule);
 
   VkShaderModule fragShaderModule;
-  prepareShaderModule("./rectangle.frag.spv", &fragShaderModule);
+  prepareShaderModule(rectangle_frag_spv, sizeof(rectangle_frag_spv), &fragShaderModule);
 
   VkPipelineShaderStageCreateInfo vertShaderStageInfo = {};
   vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -578,7 +718,7 @@ SDL_bool createPipeline()
 
   result = vkCreatePipelineLayout(g_device, &pipelineLayoutInfo, VK_NULL_HANDLE, &g_pipelineLayout);
   if (result != VK_SUCCESS) {
-    printf("failed to create pipeline layout!");
+    printf("Failed to create pipeline layout!\n");
     vkDestroyShaderModule(g_device, fragShaderModule, VK_NULL_HANDLE);
     vkDestroyShaderModule(g_device, vertShaderModule, VK_NULL_HANDLE);
     return SDL_FALSE;
@@ -602,7 +742,7 @@ SDL_bool createPipeline()
 
   result = vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &pipelineInfo, VK_NULL_HANDLE, &g_pipeline);
   if (result != VK_SUCCESS) {
-    printf("failed to create pipeline layout!");
+    printf("Failed to create graphics pipeline! result = %d\n", result);
     vkDestroyShaderModule(g_device, fragShaderModule, VK_NULL_HANDLE);
     vkDestroyShaderModule(g_device, vertShaderModule, VK_NULL_HANDLE);
     return SDL_FALSE;
@@ -621,9 +761,6 @@ SDL_bool drawRectangle()
   vkCmdPushConstants(g_cmdBufferDraw, g_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(Position), &delta);
   vkCmdDraw(g_cmdBufferDraw, 6, 1, 0, 0);
 
-  delta.x += 0.01;
-    if (delta.x >= 2.0f) { delta.x = 0.0f; }
-
   return SDL_TRUE;
 }
 
@@ -633,9 +770,9 @@ SDL_bool drawRectangle()
 
 // Main starting point for Vulkan
 //
-SDL_bool InitializeVulkan(SDL_Window *appWindow)
+SDL_bool InitializeVulkan(SDL_Window* pWindowHandle, int width, int height)
 {
-  if (!initVulkanCore(appWindow)) {
+  if (!initVulkanCore(pWindowHandle)) {
     return SDL_FALSE;
   }
 
@@ -643,7 +780,7 @@ SDL_bool InitializeVulkan(SDL_Window *appWindow)
     return SDL_FALSE;
   }
 
-  if (!initSwapchain(appWindow)) {
+  if (!initSwapchain(pWindowHandle, width, height)) {
     return SDL_FALSE;
   }
 
@@ -672,6 +809,8 @@ SDL_bool InitializeVulkan(SDL_Window *appWindow)
 
 void Update()
 {
+  delta.x += 0.01;
+  if (delta.x >= 2.0f) { delta.x = 0.0f; }
 }
 
 void Draw()
@@ -758,6 +897,11 @@ void Draw()
 void CleanupVulkan()
 {
   if (g_instance != VK_NULL_HANDLE) {
+    vkDestroySemaphore(g_device, g_presentSemaphore, NULL);
+    vkDestroySemaphore(g_device, g_renderSemaphore, NULL);
+    vkDestroyFence(g_device, g_renderFence, VK_NULL_HANDLE);
+    vkDestroyPipelineLayout(g_device, g_pipelineLayout, VK_NULL_HANDLE);
+    vkDestroyPipeline(g_device, g_pipeline, VK_NULL_HANDLE);
     vkDestroyCommandPool(g_device, g_commandPool, VK_NULL_HANDLE);
     vkDestroyRenderPass(g_device, g_renderPass, VK_NULL_HANDLE);
     vkDestroySwapchainKHR(g_device, g_swapchain, VK_NULL_HANDLE);
