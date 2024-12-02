@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <math.h>
 
 #include <SDL2/SDL.h>
@@ -5,6 +9,9 @@
 
 #include "gsync.h"
 #include "vsync.h"
+
+#include <time.h>
+#include "sys/time.h"
 
 /**
  * Clock
@@ -26,8 +33,11 @@ void initializeClock(struct Clock *clock)
 
 void updateClock(struct Clock *clock)
 {
+  struct timeval currentTime;
+  gettimeofday(&currentTime, 0);
+
   clock->lastTimeSec = clock->currentTimeSec;
-  // clock->currentTimeSec = (double)glutGet(GLUT_ELAPSED_TIME) * 0.001f;
+  clock->currentTimeSec = (double)currentTime.tv_sec + currentTime.tv_usec / 1000000.0;
   clock->deltaSec = clock->currentTimeSec - clock->lastTimeSec;
 }
 
@@ -55,11 +65,11 @@ inline double min(double a, double b)
   return (a < b) ? a : b;
 }
 
-void initializeFrameRateController(struct FrameRateController *frameRateController)
+void initializeFrameRateController(struct FrameRateController *frameRateController, int refreshRate)
 {
   frameRateController->frameRateFloor = 10;
   frameRateController->frameRateMin = 30;
-  frameRateController->frameRateMax = max(60, 144);
+  frameRateController->frameRateMax = max(60, refreshRate);
 }
 
 void increaseMinFrameRate(struct FrameRateController *frameRateController, int byNrOfFrames)
@@ -110,11 +120,16 @@ typedef struct Application_t
   struct GSyncController gsyncController;
   struct VSyncController vsyncController;
 
-  int       animationSpeed;
+  int       animationDurationSec;
   SDL_bool  running;
 
   SDL_Window* pWindowHandle;
 } Application;
+
+typedef struct FrameContext_t {
+  double frameDelay;
+  int animationDurationSec;
+} FrameContext;
 
 static void toggleGSync(Application *app)
 {
@@ -129,15 +144,13 @@ static void toggleVSync(Application *app)
 static void initializeApplication(Application *app)
 {
   /* Application initialization */
-  app->animationSpeed = 5;
+  SDL_Init(SDL_INIT_VIDEO);
+
+  // Time the rectangle will travel to the edge in second
+  // the bigger value the slower it will move.
+  app->animationDurationSec = 5;
   app->running = false;
 
-  initializeClock(&app->clock);
-  initializeFrameRateController(&app->frameRateController);
-
-  vsyncInitialize(&app->vsyncController);
-
-  SDL_Init(SDL_INIT_VIDEO);
   SDL_DisplayMode displayMode;
   SDL_GetCurrentDisplayMode(0, &displayMode);
 
@@ -153,7 +166,26 @@ static void initializeApplication(Application *app)
     printf("Failed to initialize Vulkan. Exiting app.\n");
   };
 
+  initializeClock(&app->clock);
+  initializeFrameRateController(&app->frameRateController, displayMode.refresh_rate);
+
+  vsyncInitialize(&app->vsyncController);
+
   app->running = true;
+}
+
+float computeVerticalBarXPosition(Application* app, FrameContext* frameContext)
+{
+  static float translation = 0.0;
+
+  // We are in NDC space total width is 2 (-1 to 1)
+  const float speedPixelPerSec = 2.0f/frameContext->animationDurationSec;
+  translation += speedPixelPerSec * app->clock.deltaSec;
+
+  if (translation >= 2.0f)
+    translation = 0.0f;
+
+  return translation;
 }
 
 #ifdef USE_OPENGL
@@ -206,21 +238,6 @@ void printStatus(const char *label, bool available, bool enabled)
   int width  = glutBitmapLength(GLUT_BITMAP_HELVETICA_18, (const unsigned char*)label);
   int height = glutBitmapHeight(GLUT_BITMAP_HELVETICA_18);
   glBitmap(0, 0, 0, 0, -width, -height, NULL);
-}
-
-float computeVerticalBarXPosition()
-{
-  static float translation = 0.0;
-
-  const int width = glutGet(GLUT_WINDOW_WIDTH);
-  const float speedPixelPerSec = width / (float)app.animationSpeed;
-
-  translation += speedPixelPerSec * app.clock.deltaSec;
-
-  if (translation >= width)
-      translation -= width;
-
-  return translation;
 }
 
 void drawScene()
@@ -422,6 +439,15 @@ void specialKeyPress(int key, int x, int y)
 
 #endif
 
+static void beginFrame(Application *app, FrameContext *frameContext)
+{
+  updateClock(&app->clock);
+  computeNextFrameDelayMsec(&app->frameRateController, app->clock.currentTimeSec);
+
+  frameContext->frameDelay = app->frameRateController.nextFrameDelaySec;
+  frameContext->animationDurationSec = app->animationDurationSec;
+}
+
 static void processEvents(Application* app)
 {
   SDL_Event event;
@@ -431,15 +457,31 @@ static void processEvents(Application* app)
         app->running = false;
       break;
       case SDL_KEYUP:
+        printf("dupa\n");
         if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE
             || event.key.keysym.scancode == SDL_SCANCODE_Q) {
           app->running = false;
           printf("Exit app!\n");
         }
+        if (event.key.keysym.scancode == SDL_SCANCODE_PAGEUP) {
+
+        }
+        if (event.key.keysym.scancode == SDL_SCANCODE_PAGEDOWN) {
+
+        }
       break;
       default:
         break;
     }
+}
+
+static void endFrame(Application *app, FrameContext *frameContext)
+{
+  struct timespec ts;
+  ts.tv_sec = 0;
+  ts.tv_nsec = frameContext->frameDelay * 1000000000L;
+
+  nanosleep(&ts, NULL);
 }
 
 static void cleanupApplication(Application *app)
@@ -453,6 +495,7 @@ static void cleanupApplication(Application *app)
 int main(int, char**)
 {
   Application app;
+  FrameContext frameCtx;
 
   gsyncInitialize(&app.gsyncController);
 
@@ -465,10 +508,12 @@ int main(int, char**)
   initializeApplication(&app);
 
   while(app.running) {
+    beginFrame(&app, &frameCtx);
     processEvents(&app);
 
-    Update();
+    Update(computeVerticalBarXPosition(&app, &frameCtx));
     Draw();
+    endFrame(&app, &frameCtx);
   }
 
   gsyncFinalize(&app.gsyncController);

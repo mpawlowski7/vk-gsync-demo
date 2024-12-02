@@ -7,7 +7,7 @@
 #include <vulkan/vulkan.h>
 
 SDL_bool InitializeVulkan(SDL_Window* pWindowHandle, int width, int height);
-void Update();
+void Update(float position);
 void Draw();
 void CleanupVulkan();
 

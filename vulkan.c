@@ -1,12 +1,7 @@
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-
 #include "vulkan.h"
 #include <X11/Xlib.h>
 
 #include <stdio.h>
-#include <time.h>
 
 #include "rectangle_frag.spv.h"
 #include "rectangle_vert.spv.h"
@@ -110,6 +105,16 @@ static SDL_bool prepareShaderModule(uint32_t* shaderBinary, int shaderSize, VkSh
   }
 
   return SDL_TRUE;
+}
+
+static void beginFrame()
+{
+
+}
+
+static void endFrame()
+{
+
 }
 
 // ------ Private API ----------
@@ -807,10 +812,9 @@ SDL_bool InitializeVulkan(SDL_Window* pWindowHandle, int width, int height)
   return SDL_TRUE;
 }
 
-void Update()
+void Update(float position)
 {
-  delta.x += 0.01;
-  if (delta.x >= 2.0f) { delta.x = 0.0f; }
+  delta.x = position;
 }
 
 void Draw()
@@ -884,12 +888,6 @@ void Draw()
 
     vkQueuePresentKHR(g_presentQueue, &presentInfo);
   }
-
-  // Temp framelimiter;
-  struct timespec ts;
-  ts.tv_sec = 0;
-  ts.tv_nsec = 16600000L;
-  nanosleep(&ts, NULL);
 }
 
 // Release Vulkan resources
