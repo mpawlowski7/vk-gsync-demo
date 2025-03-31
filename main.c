@@ -19,26 +19,26 @@
 
 struct Clock
 {
-  double currentTimeSec;
-  double lastTimeSec;
-  double deltaSec; /* Delta Time */
+    double currentTimeSec;
+    double lastTimeSec;
+    double deltaSec; /* Delta Time */
 };
 
 void initializeClock(struct Clock *clock)
 {
-  clock->currentTimeSec = 0;
-  clock->lastTimeSec = 0;
-  clock->deltaSec = 0;
+    clock->currentTimeSec = 0;
+    clock->lastTimeSec = 0;
+    clock->deltaSec = 0;
 }
 
 void updateClock(struct Clock *clock)
 {
-  struct timeval currentTime;
-  gettimeofday(&currentTime, 0);
+    struct timeval currentTime;
+    gettimeofday(&currentTime, 0);
 
-  clock->lastTimeSec = clock->currentTimeSec;
-  clock->currentTimeSec = (double)currentTime.tv_sec + currentTime.tv_usec / 1000000.0;
-  clock->deltaSec = clock->currentTimeSec - clock->lastTimeSec;
+    clock->lastTimeSec = clock->currentTimeSec;
+    clock->currentTimeSec = (double) currentTime.tv_sec + currentTime.tv_usec / 1000000.0;
+    clock->deltaSec = clock->currentTimeSec - clock->lastTimeSec;
 }
 
 /**
@@ -47,65 +47,69 @@ void updateClock(struct Clock *clock)
 
 struct FrameRateController
 {
-  int frameRateFloor;
-  int frameRateMin;
-  int frameRateMax;
+    int frameRateFloor;
+    int frameRateMin;
+    int frameRateMax;
 
-  double currentSimulatedFrameRate;
-  double nextFrameDelaySec;
+    double currentSimulatedFrameRate;
+    double nextFrameDelaySec;
 };
 
 inline double max(double a, double b)
 {
-  return (a > b) ? a : b;
+    return (a > b) ? a : b;
 }
 
 inline double min(double a, double b)
 {
-  return (a < b) ? a : b;
+    return (a < b) ? a : b;
 }
 
 void initializeFrameRateController(struct FrameRateController *frameRateController, int refreshRate)
 {
-  frameRateController->frameRateFloor = 10;
-  frameRateController->frameRateMin = 30;
-  frameRateController->frameRateMax = max(60, refreshRate);
+    frameRateController->frameRateFloor = 10;
+    frameRateController->frameRateMin = 30;
+    frameRateController->frameRateMax = max(60, refreshRate);
 }
 
 void increaseMinFrameRate(struct FrameRateController *frameRateController, int byNrOfFrames)
 {
-  frameRateController->frameRateMin =
-    min(frameRateController->frameRateMin + byNrOfFrames, frameRateController->frameRateMax);
+    frameRateController->frameRateMin =
+        min(frameRateController->frameRateMin + byNrOfFrames, frameRateController->frameRateMax);
 }
 
 void increaseMaxFrameRate(struct FrameRateController *frameRateController, int byNrOfFrames)
 {
-  frameRateController->frameRateMax += byNrOfFrames;
+    frameRateController->frameRateMax += byNrOfFrames;
 }
 
 void decreaseMinFrameRate(struct FrameRateController *frameRateController, int byNrOfFrames)
 {
-  frameRateController->frameRateMin =
-    max(frameRateController->frameRateMin - byNrOfFrames, frameRateController->frameRateFloor);
+    frameRateController->frameRateMin =
+        max(frameRateController->frameRateMin - byNrOfFrames, frameRateController->frameRateFloor);
 }
 
 void decreaseMaxFrameRate(struct FrameRateController *frameRateController, int byNrOfFrames)
 {
-  frameRateController->frameRateMax =
-    max(frameRateController->frameRateMax - byNrOfFrames, frameRateController->frameRateMin);
+    frameRateController->frameRateMax =
+        max(frameRateController->frameRateMax - byNrOfFrames, frameRateController->frameRateMin);
 }
 
-void computeNextFrameDelayMsec(struct FrameRateController *frameRateController, double currentTimeSec)
+void computeNextFrameDelayMsec(
+    struct FrameRateController *frameRateController,
+    double currentTimeSec)
 {
-  const double frameRateMin = max(frameRateController->frameRateFloor, frameRateController->frameRateMin);
-  const double frameRateRange = (frameRateController->frameRateMax - frameRateMin);
-  const double frameRateRangeMean = (frameRateMin + frameRateController->frameRateMax) / 2.0;
-  const double frameRateAmplitude = frameRateRange / 2.0;
+    const double frameRateMin = max(
+        frameRateController->frameRateFloor,
+        frameRateController->frameRateMin);
+    const double frameRateRange = (frameRateController->frameRateMax - frameRateMin);
+    const double frameRateRangeMean = (frameRateMin + frameRateController->frameRateMax) / 2.0;
+    const double frameRateAmplitude = frameRateRange / 2.0;
 
-  frameRateController->currentSimulatedFrameRate =
-    frameRateRangeMean + frameRateAmplitude * sin(currentTimeSec);
+    frameRateController->currentSimulatedFrameRate =
+        frameRateRangeMean + frameRateAmplitude * sin(currentTimeSec);
 
-  frameRateController->nextFrameDelaySec = 1.0 / frameRateController->currentSimulatedFrameRate;
+    frameRateController->nextFrameDelaySec = 1.0 / frameRateController->currentSimulatedFrameRate;
 }
 
 /**
@@ -114,78 +118,84 @@ void computeNextFrameDelayMsec(struct FrameRateController *frameRateController, 
 
 typedef struct Application_t
 {
-  struct Clock clock;
-  struct FrameRateController frameRateController;
+    struct Clock clock;
+    struct FrameRateController frameRateController;
 
-  struct GSyncController gsyncController;
-  struct VSyncController vsyncController;
+    struct GSyncController gsyncController;
+    struct VSyncController vsyncController;
 
-  int       animationDurationSec;
-  SDL_bool  running;
+    int animationDurationSec;
+    SDL_bool running;
 
-  SDL_Window* pWindowHandle;
+    SDL_Window *pWindowHandle;
 } Application;
 
-typedef struct FrameContext_t {
-  double frameDelay;
-  int animationDurationSec;
+typedef struct FrameContext_t
+{
+    double frameDelay;
+    int animationDurationSec;
 } FrameContext;
 
 static void toggleGSync(Application *app)
 {
-  gsyncSetAllowed(&app->gsyncController, !gsyncIsAllowed(&app->gsyncController));
+    gsyncSetAllowed(&app->gsyncController, !gsyncIsAllowed(&app->gsyncController));
 }
 
 static void toggleVSync(Application *app)
 {
-  vsyncSetEnabled(&app->vsyncController, !vsyncIsEnabled(&app->vsyncController));
+    vsyncSetEnabled(&app->vsyncController, !vsyncIsEnabled(&app->vsyncController));
 }
 
 static void initializeApplication(Application *app)
 {
-  /* Application initialization */
-  SDL_Init(SDL_INIT_VIDEO);
+    /* Application initialization */
+    SDL_Init(SDL_INIT_VIDEO);
 
-  // Time the rectangle will travel to the edge in second
-  // the bigger value the slower it will move.
-  app->animationDurationSec = 5;
-  app->running = false;
+    // Time the rectangle will travel to the edge in second
+    // the bigger value the slower it will move.
+    app->animationDurationSec = 5;
+    app->running = false;
 
-  SDL_DisplayMode displayMode;
-  SDL_GetCurrentDisplayMode(0, &displayMode);
+    SDL_DisplayMode displayMode;
+    SDL_GetCurrentDisplayMode(0, &displayMode);
 
-  uint32_t windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN;
-  app->pWindowHandle = SDL_CreateWindow(APP_NAME, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-                                                      displayMode.w, displayMode.h, windowFlags);
-  if (app->pWindowHandle == NULL) {
-    printf("Failed to create SDL_Window. Exiting app.\n");
-    return;
-  }
+    uint32_t windowFlags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN;
+    app->pWindowHandle = SDL_CreateWindow(
+        APP_NAME,
+        SDL_WINDOWPOS_UNDEFINED,
+        SDL_WINDOWPOS_UNDEFINED,
+        displayMode.w,
+        displayMode.h,
+        windowFlags);
+    if (app->pWindowHandle == NULL) {
+        printf("Failed to create SDL_Window. Exiting app.\n");
+        return;
+    }
 
-  if (!InitializeVulkan(app->pWindowHandle, displayMode.w, displayMode.h)) {
-    printf("Failed to initialize Vulkan. Exiting app.\n");
-  };
+    if (!InitializeVulkan(app->pWindowHandle, displayMode.w, displayMode.h)) {
+        printf("Failed to initialize Vulkan. Exiting app.\n");
+    };
 
-  initializeClock(&app->clock);
-  initializeFrameRateController(&app->frameRateController, displayMode.refresh_rate);
+    initializeClock(&app->clock);
+    initializeFrameRateController(&app->frameRateController, displayMode.refresh_rate);
 
-  vsyncInitialize(&app->vsyncController);
+    vsyncInitialize(&app->vsyncController);
 
-  app->running = true;
+    app->running = true;
 }
 
-float computeVerticalBarXPosition(Application* app, FrameContext* frameContext)
+float computeVerticalBarXPosition(Application *app, FrameContext *frameContext)
 {
-  static float translation = 0.0;
+    static float translation = 0.0;
 
-  // We are in NDC space total width is 2 (-1 to 1)
-  const float speedPixelPerSec = 2.0f/frameContext->animationDurationSec;
-  translation += speedPixelPerSec * app->clock.deltaSec;
+    // We are in NDC space total width is 2 (-1 to 1)
+    const float speedPixelPerSec = 2.0f / frameContext->animationDurationSec;
+    translation += speedPixelPerSec * app->clock.deltaSec;
 
-  if (translation >= 2.0f)
-    translation = 0.0f;
+    if (translation >= 2.0f)
+        translation = 0.0f;
 
-  return translation;
+    return translation;
 }
 
 #ifdef USE_OPENGL
@@ -441,84 +451,81 @@ void specialKeyPress(int key, int x, int y)
 
 static void beginFrame(Application *app, FrameContext *frameContext)
 {
-  updateClock(&app->clock);
-  computeNextFrameDelayMsec(&app->frameRateController, app->clock.currentTimeSec);
+    updateClock(&app->clock);
+    computeNextFrameDelayMsec(&app->frameRateController, app->clock.currentTimeSec);
 
-  frameContext->frameDelay = app->frameRateController.nextFrameDelaySec;
-  frameContext->animationDurationSec = app->animationDurationSec;
+    frameContext->frameDelay = app->frameRateController.nextFrameDelaySec;
+    frameContext->animationDurationSec = app->animationDurationSec;
 }
 
-static void processEvents(Application* app)
+static void processEvents(Application *app)
 {
-  SDL_Event event;
-  while(SDL_PollEvent(&event))
-    switch (event.type) {
-      case SDL_QUIT:
-        app->running = false;
-      break;
-      case SDL_KEYUP:
-        printf("dupa\n");
-        if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE
-            || event.key.keysym.scancode == SDL_SCANCODE_Q) {
-          app->running = false;
-          printf("Exit app!\n");
+    SDL_Event event;
+    while (SDL_PollEvent(&event))
+        switch (event.type) {
+        case SDL_QUIT:
+            app->running = false;
+            break;
+        case SDL_KEYUP:
+            if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE
+                || event.key.keysym.scancode == SDL_SCANCODE_Q) {
+                app->running = false;
+                printf("Exit app!\n");
+            }
+            if (event.key.keysym.scancode == SDL_SCANCODE_PAGEUP) {
+            }
+            if (event.key.keysym.scancode == SDL_SCANCODE_PAGEDOWN) {
+            }
+            break;
+        default:
+            break;
         }
-        if (event.key.keysym.scancode == SDL_SCANCODE_PAGEUP) {
-
-        }
-        if (event.key.keysym.scancode == SDL_SCANCODE_PAGEDOWN) {
-
-        }
-      break;
-      default:
-        break;
-    }
 }
 
 static void endFrame(Application *app, FrameContext *frameContext)
 {
-  struct timespec ts;
-  ts.tv_sec = 0;
-  ts.tv_nsec = frameContext->frameDelay * 1000000000L;
+    struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = frameContext->frameDelay * 1000000000L;
 
-  nanosleep(&ts, NULL);
+    nanosleep(&ts, NULL);
 }
 
 static void cleanupApplication(Application *app)
 {
-  CleanupVulkan();
+    CleanupVulkan();
 
-  SDL_DestroyWindow(app->pWindowHandle);
-  SDL_Quit();
+    SDL_DestroyWindow(app->pWindowHandle);
+    SDL_Quit();
 }
 
-int main(int, char**)
+int main(int, char **)
 {
-  Application app;
-  FrameContext frameCtx;
+    Application app;
+    FrameContext frameCtx;
 
-  gsyncInitialize(&app.gsyncController);
+    gsyncInitialize(&app.gsyncController);
 
-  /* Force G-SYNC Visual Indicator
-     For an unknown reason, we must do it twice to make it work...
-     (the second call enables the first value) */
-  gsyncShowVisualIndicator(&app.gsyncController, true);
-  gsyncShowVisualIndicator(&app.gsyncController, true);
+    /* Force G-SYNC Visual Indicator
+       For an unknown reason, we must do it twice to make it work...
+       (the second call enables the first value) */
+    gsyncShowVisualIndicator(&app.gsyncController, true);
+    gsyncShowVisualIndicator(&app.gsyncController, true);
 
-  initializeApplication(&app);
+    initializeApplication(&app);
 
-  while(app.running) {
-    beginFrame(&app, &frameCtx);
-    processEvents(&app);
+    while (app.running) {
+        beginFrame(&app, &frameCtx);
+        processEvents(&app);
 
-    Update(computeVerticalBarXPosition(&app, &frameCtx));
-    Draw();
-    endFrame(&app, &frameCtx);
-  }
+        Update(computeVerticalBarXPosition(&app, &frameCtx));
+        Draw();
+        endFrame(&app, &frameCtx);
+    }
 
-  gsyncFinalize(&app.gsyncController);
+    gsyncFinalize(&app.gsyncController);
 
-  cleanupApplication(&app);
+    cleanupApplication(&app);
 
-  return 0;
+    return 0;
 }
