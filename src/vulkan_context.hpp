@@ -10,7 +10,8 @@
 // #include <vulkan/vulkan.h>
 #include <vulkan/vulkan.hpp>
 
-class VulkanContext {
+class VulkanContext
+{
 public:
     VulkanContext() = default;
     VulkanContext(SDL_Window *window, int width, int height);
@@ -28,7 +29,7 @@ private:
     bool createRenderPass();
     bool createFramebuffers();
     bool createSyncObjects();
-    bool createPipeline();
+    bool createGraphicsPipeline();
     bool createCommandBuffers();
     void drawRectangle() const;
 
@@ -41,38 +42,38 @@ private:
     std::vector<const char*>             m_enabledInstanceExt;
     std::vector<const char*>             m_enabledDeviceExt;
 
-    VkInstance                           m_instance;
+    VkInstance                           m_instance{};
 #if VULKAN_DEBUG
-    VkDebugReportCallbackEXT             m_debugCallbackEXT;
+    VkDebugReportCallbackEXT             m_debugCallbackEXT{};
 #endif
-    VkPhysicalDevice                     m_physicalDevice;
-    VkPhysicalDeviceProperties           m_physicalDeviceProperties;
-    VkPhysicalDeviceFeatures             m_physicalDeviceFeatures;
-    VkPhysicalDeviceMemoryProperties     m_physicalDeviceMemoryProperties;
+    VkPhysicalDevice                     m_physicalDevice{};
+    VkPhysicalDeviceProperties           m_physicalDeviceProperties{};
+    VkPhysicalDeviceFeatures             m_physicalDeviceFeatures{};
+    VkPhysicalDeviceMemoryProperties     m_physicalDeviceMemoryProperties{};
     std::vector<VkQueueFamilyProperties> m_queueFamilyProperties;
-    VkDevice                             m_device;
-    VkQueue                              m_presentQueue;
+    VkDevice                             m_device{};
+    VkQueue                              m_presentQueue{};
 
-    VkCommandPool                        m_commandPool;
-    VkCommandBuffer                      m_cmdBufferDraw;
+    VkCommandPool                        m_commandPool{};
+    VkCommandBuffer                      m_cmdBufferDraw{};
 
     VkSurfaceKHR                         m_surface{};
-    VkSwapchainKHR                       m_swapchain;
-    VkSurfaceCapabilitiesKHR             m_surfaceCapabilities;
-    VkSurfaceFormatKHR                   m_surfaceFormat;
-    VkExtent2D                           m_swapchainExtent;
+    VkSwapchainKHR                       m_swapchain{};
+    VkSurfaceCapabilitiesKHR             m_surfaceCapabilities{};
+    VkSurfaceFormatKHR                   m_surfaceFormat{};
+    VkExtent2D                           m_swapchainExtent{};
     std::vector<VkImage>                 m_swapchainImages;
     std::vector<VkImageView>             m_colorImageViews;
-    uint32_t                             m_swapchainImageCount;
+    uint32_t                             m_swapchainImageCount{};
 
-    VkRenderPass                         m_renderPass;
+    VkRenderPass                         m_renderPass{};
     std::vector<VkFramebuffer>           m_framebuffers;
-    VkFence                              m_renderFence;
-    VkSemaphore                          m_renderSemaphore,
-                                         m_presentSemaphore;
+    VkFence                              m_renderFence{};
+    VkSemaphore                          m_renderSemaphore{},
+                                         m_presentSemaphore{};
 
-    VkPipelineLayout                     m_pipelineLayout;
-    VkPipeline                           m_pipeline;
+    VkPipelineLayout                     m_pipelineLayout{};
+    VkPipeline                           m_pipeline{};
 
 
     SDL_Window                          *m_sdlWindow = nullptr;

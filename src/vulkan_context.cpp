@@ -13,7 +13,7 @@
 
 #define USE_DIRECT_DISPLAY 0
 
-#define VK_KHR_WAYLAND_SURFACE                    "VK_KHR_wayland_surface"
+#define VK_KHR_WAYLAND_SURFACE                     "VK_KHR_wayland_surface"
 #define VK_KHR_XLIB_SURFACE_EXTENSION_NAME         "VK_KHR_xlib_surface"
 #define VK_EXT_ACQUIRE_XLIB_DISPLAY_EXTENSION_NAME "VK_EXT_acquire_xlib_display"
 
@@ -99,7 +99,7 @@ bool VulkanContext::InitVulkan()
         return false;
     }
 
-    if (!createPipeline()) {
+    if (!createGraphicsPipeline()) {
         return false;
     }
 
@@ -762,29 +762,29 @@ bool VulkanContext::createSyncObjects()
     return true;
 }
 
-bool VulkanContext::createPipeline()
+bool VulkanContext::createGraphicsPipeline()
 {
-    fmt::print("{} called\n", __func__);
+    printf("%s called\n", __func__);
 
     VkResult result;
 
-    VkShaderModule vertShaderModule;
-    prepareShaderModule(rectangle_vert_spv, sizeof(rectangle_vert_spv), &vertShaderModule);
+    VkShaderModule vert_shader_module;
+    prepareShaderModule(rectangle_vert_spv, sizeof(rectangle_vert_spv), &vert_shader_module);
 
-    VkShaderModule fragShaderModule;
-    prepareShaderModule(rectangle_frag_spv, sizeof(rectangle_frag_spv), &fragShaderModule);
+    VkShaderModule frag_shader_module;
+    prepareShaderModule(rectangle_frag_spv, sizeof(rectangle_frag_spv), &frag_shader_module);
 
     VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_VERTEX_BIT,
-        .module = vertShaderModule,
+        .module = vert_shader_module,
         .pName = "main",
     };
 
     VkPipelineShaderStageCreateInfo fragShaderStageInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .module = fragShaderModule,
+        .module = frag_shader_module,
         .pName = "main"
     };
 
@@ -806,8 +806,8 @@ bool VulkanContext::createPipeline()
     };
 
     // Static viewport and scissors
-    float vpWidth = static_cast<float>(m_swapchainExtent.width);
-    float vpHeight = static_cast<float>(m_swapchainExtent.height);
+    auto vpWidth = static_cast<float>(m_swapchainExtent.width);
+    auto vpHeight = static_cast<float>(m_swapchainExtent.height);
     VkViewport viewport = {
         .x = 0.0f,
         .y = 0.0f,
@@ -842,8 +842,8 @@ bool VulkanContext::createPipeline()
 
     VkPipelineMultisampleStateCreateInfo multisamplingInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .sampleShadingEnable = VK_FALSE,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .sampleShadingEnable = VK_FALSE
     };
 
     VkPipelineColorBlendAttachmentState colorBlendingAttachment = {
@@ -862,9 +862,9 @@ bool VulkanContext::createPipeline()
     };
 
     VkPushConstantRange pushConstant = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .offset = 0,
         .size = sizeof(Position),
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
     };
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
@@ -879,44 +879,42 @@ bool VulkanContext::createPipeline()
         VK_NULL_HANDLE,
         &m_pipelineLayout);
     if (result != VK_SUCCESS) {
-        fmt::print("Failed to create pipeline layout!\n");
-        vkDestroyShaderModule(m_device, fragShaderModule, VK_NULL_HANDLE);
-        vkDestroyShaderModule(m_device, vertShaderModule, VK_NULL_HANDLE);
+        printf("Failed to create pipeline layout!\n");
+        vkDestroyShaderModule(m_device, frag_shader_module, VK_NULL_HANDLE);
+        vkDestroyShaderModule(m_device, vert_shader_module, VK_NULL_HANDLE);
         return false;
     }
 
-    VkGraphicsPipelineCreateInfo pipelineInfo = {};
-    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipelineInfo.stageCount = sizeof(shaderStages) / (sizeof(*shaderStages));
-    pipelineInfo.pStages = shaderStages;
-    pipelineInfo.pVertexInputState = &vertexInputInfo;
-    pipelineInfo.pInputAssemblyState = &inputAssemblyInfo;
-    pipelineInfo.pViewportState = &viewportInfo;
-    pipelineInfo.pRasterizationState = &rasterizerInfo;
-    pipelineInfo.pMultisampleState = &multisamplingInfo;
-    pipelineInfo.pColorBlendState = &colorBlendingInfo;
-    pipelineInfo.pDynamicState = VK_NULL_HANDLE;
-    pipelineInfo.layout = m_pipelineLayout;
-    pipelineInfo.renderPass = m_renderPass;
-    pipelineInfo.subpass = 0;
-    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+    VkGraphicsPipelineCreateInfo info = {};
+    info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    info.stageCount = sizeof(shaderStages) / (sizeof(*shaderStages));
+    info.pStages = shaderStages;
+    info.pVertexInputState = &vertexInputInfo;
+    info.pInputAssemblyState = &inputAssemblyInfo;
+    info.pViewportState = &viewportInfo;
+    info.pRasterizationState = &rasterizerInfo;
+    info.pMultisampleState = &multisamplingInfo;
+    info.pColorBlendState = &colorBlendingInfo;
+    info.pDynamicState = VK_NULL_HANDLE;
+    info.layout = m_pipelineLayout;
+    info.renderPass = m_renderPass;
+    info.subpass = 0;
+    info.basePipelineHandle = VK_NULL_HANDLE;
 
     result = vkCreateGraphicsPipelines(
         m_device,
         VK_NULL_HANDLE,
         1,
-        &pipelineInfo,
+        &info,
         VK_NULL_HANDLE,
         &m_pipeline);
+
     if (result != VK_SUCCESS) {
-        fmt::print("Failed to create graphics pipeline! result = %d\n", result);
-        vkDestroyShaderModule(m_device, fragShaderModule, VK_NULL_HANDLE);
-        vkDestroyShaderModule(m_device, vertShaderModule, VK_NULL_HANDLE);
-        return false;
+        printf("Failed to create graphics pipeline! result = %d\n", result);
     }
 
-    vkDestroyShaderModule(m_device, fragShaderModule, VK_NULL_HANDLE);
-    vkDestroyShaderModule(m_device, vertShaderModule, VK_NULL_HANDLE);
+    vkDestroyShaderModule(m_device, frag_shader_module, VK_NULL_HANDLE);
+    vkDestroyShaderModule(m_device, vert_shader_module, VK_NULL_HANDLE);
 
     return result == VK_SUCCESS;
 }
@@ -946,7 +944,7 @@ bool VulkanContext::prepareShaderModule(const uint32_t *shaderBinary, uint32_t s
 
     VkResult result = vkCreateShaderModule(m_device, &shaderInfo, VK_NULL_HANDLE, pShaderModule);
     if (result != VK_SUCCESS) {
-        fmt::print("Failed to create shader module \n");
+        printf("Failed to create shader module \n");
         return false;
     }
 
