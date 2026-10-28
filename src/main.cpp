@@ -1,13 +1,26 @@
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#endif
+
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 #include <SDL3/SDL.h>
 #include "vulkan_context.hpp"
 
 #include <chrono>
 #include <thread>
+#ifndef _WIN32
 #include <bits/ios_base.h>
+#endif
 
-#include <fmt/core.h>
+#include <fmt/format.h>
 
 /**
  * Clock
@@ -32,24 +45,73 @@ public:
 };
 
 /**
- * FrameRateController
+ * Frame rate limiter.
+ *
+ * Target rate sweeps between min and max so VRR/G-SYNC can be observed.
+ * Max defaults to the display refresh rate. limit() holds each frame so the
+ * realized rate does not exceed that target; time already spent rendering is
+ * subtracted from the budget.
  */
-
 class FpsController
 {
+  using Clock = std::chrono::steady_clock;
+
   double frameRateFloor;
   double frameRateMin;
   double frameRateMax;
+  double refreshRateHz;
 
   double currentSimulatedFrameRate;
-  double nextFrameDelaySec;
+  double elapsedSec;
+
+  Clock::time_point epoch;
+  Clock::time_point frameStart;
+  Clock::duration frameDelta;
+  Clock::duration targetFrameDuration;
+  bool started;
+
+  static Clock::duration durationForRate(double fps)
+  {
+    const auto exact = std::chrono::duration<double>(1.0 / fps);
+    auto ticks = std::chrono::duration_cast<Clock::duration>(exact);
+    /* Ceil so the cap is never shorter than 1/fps. */
+    if (std::chrono::duration<double>(ticks) < exact)
+      ++ticks;
+    return ticks;
+  }
+
+  void updateTarget(Clock::time_point now)
+  {
+    elapsedSec = std::chrono::duration<double>(now - epoch).count();
+
+    const double clampedMin = std::max(frameRateFloor, std::min(frameRateMin, frameRateMax));
+    const double clampedMax = std::max(clampedMin, frameRateMax);
+    const double range = clampedMax - clampedMin;
+    const double mean = (clampedMin + clampedMax) / 2.0;
+    const double amplitude = range / 2.0;
+
+    currentSimulatedFrameRate = mean + amplitude * std::sin(elapsedSec);
+    if (currentSimulatedFrameRate < frameRateFloor)
+      currentSimulatedFrameRate = frameRateFloor;
+
+    targetFrameDuration = durationForRate(currentSimulatedFrameRate);
+  }
 
 public:
-  FpsController(int refreshRate)
+  explicit FpsController(double refreshRate)
+    : frameRateFloor(10.0)
+    , refreshRateHz(refreshRate > 1.0 ? refreshRate : 60.0)
+    , currentSimulatedFrameRate(0.0)
+    , elapsedSec(0.0)
+    , epoch(Clock::now())
+    , frameStart(epoch)
+    , frameDelta(Clock::duration::zero())
+    , started(false)
   {
-    frameRateFloor = 10;
-    frameRateMin = 30;
-    frameRateMax = std::max(60, refreshRate);
+    frameRateMax = refreshRateHz;
+    frameRateMin = std::min(30.0, frameRateMax);
+    currentSimulatedFrameRate = frameRateMax;
+    targetFrameDuration = durationForRate(currentSimulatedFrameRate);
   }
 
   void increaseMin(int byNrOfFrames)
@@ -72,20 +134,71 @@ public:
     frameRateMax = std::max(frameRateMax - byNrOfFrames, frameRateMin);
   }
 
-  void computeNextFrameDelayMsec(
-    double currentTimeSec)
+  void beginFrame()
   {
-    const double frameRateMin = std::max(frameRateFloor, frameRateMin);
-    const double frameRateRange = frameRateMax - frameRateMin;
-    const double frameRateRangeMean = (frameRateMin + frameRateMax) / 2.0;
-    const double frameRateAmplitude = frameRateRange / 2.0;
+    const auto now = Clock::now();
+    if (!started) {
+      epoch = now;
+      frameStart = now;
+      started = true;
+    }
 
-    currentSimulatedFrameRate = frameRateRangeMean + frameRateAmplitude * sin(currentTimeSec);
+    frameDelta = now - frameStart;
+    frameStart = now;
+    updateTarget(now);
+  }
 
-    nextFrameDelaySec = 1.0 / currentSimulatedFrameRate;
+  /* Block until this frame has lasted 1/targetRate. No-op if already late. */
+  void limit() const
+  {
+    const auto deadline = frameStart + targetFrameDuration;
+    const auto now = Clock::now();
+    if (now >= deadline)
+      return;
+
+    /* sleep_until can wake ~1ms late. Sleep the bulk, then spin the tail so
+       the cap stays accurate above 60 Hz. */
+    constexpr auto spinSlack = std::chrono::microseconds(1000);
+    if (now + spinSlack < deadline)
+      std::this_thread::sleep_until(deadline - spinSlack);
+
+    while (Clock::now() < deadline) {
+    }
+  }
+
+  double minFrameRate() const
+  {
+    return frameRateMin;
+  }
+
+  double maxFrameRate() const
+  {
+    return frameRateMax;
+  }
+
+  double refreshRate() const
+  {
+    return refreshRateHz;
+  }
+
+  double targetFrameRate() const
+  {
+    return currentSimulatedFrameRate;
+  }
+
+  double elapsedSeconds() const
+  {
+    return elapsedSec;
+  }
+
+  double measuredFrameRate() const
+  {
+    const double dt = std::chrono::duration<double>(frameDelta).count();
+    if (dt <= 0.0)
+      return 0.0;
+    return 1.0 / dt;
   }
 };
-
 
 /**
 * Application
@@ -96,16 +209,21 @@ class MyAppl
   int rectangleSpeed;
   bool running;
 
-  TimePoint startFrame;
-  uint64_t targetFrameTimeNs;
-
   SDL_Window* window;
   VulkanContext vkCtx;
+  FpsController fps;
 
+  int statsFrames;
+  std::chrono::steady_clock::time_point statsStart;
 
 public:
-  MyAppl(SDL_Window* Window)
-    : running(false), window(Window), rectangleSpeed(5)
+  MyAppl(SDL_Window* Window, double refreshRateHz)
+    : rectangleSpeed(5)
+    , running(false)
+    , window(Window)
+    , fps(refreshRateHz)
+    , statsFrames(0)
+    , statsStart(std::chrono::steady_clock::now())
   {
     vkCtx = VulkanContext(window, 1920, 1200);
   }
@@ -122,7 +240,10 @@ public:
       beginFrame();
       processEvents();
 
-      vkCtx.Update(0.5f);
+      /* Constant world speed; pacing comes from the limiter, not the clock. */
+      const double travelSec = rectangleSpeed;
+      const float x = static_cast<float>(std::fmod(fps.elapsedSeconds(), travelSec) / travelSec) * 2.0f;
+      vkCtx.Update(x);
       vkCtx.Draw();
       endFrame();
     }
@@ -132,12 +253,7 @@ public:
 
   void beginFrame()
   {
-    startFrame = std::chrono::high_resolution_clock::now();
-    updateClock(&app->clock);
-    computeNextFrameDelayMsec(&app->frameRateController, app->clock.currentTimeSec);
-
-    frameContext->frameDelay = app->frameRateController.nextFrameDelaySec;
-    frameContext->animationDurationSec = app->animationDurationSec;
+    fps.beginFrame();
   }
 
   void processEvents()
@@ -155,17 +271,25 @@ public:
         {
         case SDL_SCANCODE_ESCAPE:
         case SDL_SCANCODE_Q:
-          {
-            running = false;
-            printf("Exit app!\n");
-            break;
-          }
+          running = false;
+          fmt::print("Exit app!\n");
+          break;
+        case SDL_SCANCODE_UP:
+          fps.increaseMax(10);
+          break;
+        case SDL_SCANCODE_DOWN:
+          fps.decreaseMax(10);
+          break;
         case SDL_SCANCODE_PAGEUP:
+          fps.increaseMin(10);
           break;
         case SDL_SCANCODE_PAGEDOWN:
+          fps.decreaseMin(10);
+          break;
         default:
           break;
         }
+        break;
       default:
         break;
       }
@@ -174,12 +298,22 @@ public:
 
   void endFrame()
   {
-    auto endFrame = std::chrono::high_resolution_clock::now() - startFrame;
-    // timespec ts{};
-    // ts.tv_sec = 0;
-    // ts.tv_nsec = frameContext->frameDelay * 1000000000L;
+    fps.limit();
 
-    std::this_thread::sleep_for(std::chrono::nanoseconds(1000));
+    ++statsFrames;
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(now - statsStart).count();
+    if (elapsed >= 1.0) {
+      fmt::print(
+        "fps {:.1f}  target {:.1f}  range {:.0f}-{:.0f}  refresh {:.3f}\n",
+        statsFrames / elapsed,
+        fps.targetFrameRate(),
+        fps.minFrameRate(),
+        fps.maxFrameRate(),
+        fps.refreshRate());
+      statsFrames = 0;
+      statsStart = now;
+    }
   }
 
   void cleanup()
@@ -195,296 +329,32 @@ typedef struct FrameContext_t
   int animationDurationSec;
 } FrameContext;
 
-float calcBarPosition()
+double queryRefreshRateHz(SDL_Window* window)
 {
-  static float translation = 0.0;
+  SDL_DisplayID displayId = SDL_GetDisplayForWindow(window);
+  if (displayId == 0)
+    displayId = SDL_GetPrimaryDisplay();
 
-  // We are in NDC space total width is 2 (-1 to 1)
-  const float speedPixelPerSec = 2.0f / animationDurationSec;
-  translation += speedPixelPerSec * clock.deltaSec;
-
-  if (translation >= 2.0f)
-    translation = 0.0f;
-
-  return translation;
-}
-
-#ifdef USE_OPENGL
-int printText(const char* format, ...)
-{
-  char buffer[1024];
-  va_list arg;
-  int ret;
-  GLint pos[4];
-
-  /* Format the text */
-  va_start(arg, format);
-  ret = vsnprintf(buffer, sizeof(buffer), format, arg);
-  va_end(arg);
-
-  glMatrixMode(GL_MODELVIEW);
-  glPushMatrix();
-
-  /* Set raster position to force usage of last specified color */
-  glGetIntegerv(GL_CURRENT_RASTER_POSITION, pos);
-  glLoadIdentity();
-  glRasterPos2iv(pos);
-
-  /* Print it */
-  glutBitmapString(GLUT_BITMAP_HELVETICA_18, (const unsigned char*)buffer);
-
-  glPopMatrix();
-
-  return ret;
-}
-
-void printStatus(const char* label, bool available, bool enabled)
-{
-  printText(label);
-
-  glPushAttrib(GL_CURRENT_BIT);
-
-  if (available)
-  {
-    glColor3f(1.0, 1.0, 0.0);
-    printText("%s", enabled ? "ON" : "OFF");
-  }
-  else
-  {
-    glColor3f(1.0, 0.0, 0.0);
-    printText("N/A");
+  const SDL_DisplayMode* mode = nullptr;
+  if (displayId != 0) {
+    mode = SDL_GetCurrentDisplayMode(displayId);
+    if (mode == nullptr)
+      mode = SDL_GetDesktopDisplayMode(displayId);
   }
 
-  glPopAttrib();
+  if (mode != nullptr && mode->refresh_rate_numerator > 0 && mode->refresh_rate_denominator > 0)
+    return static_cast<double>(mode->refresh_rate_numerator) / mode->refresh_rate_denominator;
 
-  /* Return to the begining of line */
-  int width = glutBitmapLength(GLUT_BITMAP_HELVETICA_18, (const unsigned char*)label);
-  int height = glutBitmapHeight(GLUT_BITMAP_HELVETICA_18);
-  glBitmap(0, 0, 0, 0, -width, -height, NULL);
+  if (mode != nullptr && mode->refresh_rate > 0.0f)
+    return mode->refresh_rate;
+
+  return 0.0;
 }
-
-void drawScene()
-{
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
-
-  glColor3f(0.9f, 0.9f, 0.9f);
-
-  /* Draw a vertical bar of 5% screen width */
-  glTranslatef(computeVerticalBarXPosition(), 0.0f, 0.0f);
-  glRecti(0, 0, glutGet(GLUT_WINDOW_WIDTH) * 0.05, glutGet(GLUT_WINDOW_HEIGHT));
-}
-
-void drawGauge(int heightPx, int gradMin, int gradMax, int gradStep, double currentValue)
-{
-  const int width = 15; /* px */
-  const int gradLabelYOffset = -6; /* px */
-
-  if (gradMax == gradMin)
-  {
-    gradMin = gradMax - 10;
-    gradMax = gradMax + 10;
-  }
-
-  const float gradUnitPx = heightPx / (float)(gradMax - gradMin);
-  const int currentPosPx = (currentValue - gradMin) * gradUnitPx;
-
-  glColor3f(0.0, 1.0, 0.0);
-
-  glPushMatrix();
-  glTranslated(50, 0, 0);
-
-  glBegin(GL_LINES);
-
-  /* Draw vertical axis */
-  glVertex2i(0, 0);
-  glVertex2i(0, heightPx);
-
-  /* Draw horizontal graduations */
-  for (int grad = 0; grad <= gradMax - gradMin; grad += gradStep)
-  {
-    int y = grad * gradUnitPx;
-    glVertex2i(0, y);
-    glVertex2i(width, y);
-  }
-
-  glEnd();
-
-  /* Draw graduation labels */
-  for (int grad = gradMin; grad <= gradMax; grad += gradStep)
-  {
-    int y = (grad - gradMin) * gradUnitPx;
-    glRasterPos2i(width + 5, y + gradLabelYOffset);
-    printText("%i", grad);
-  }
-
-  glPopMatrix();
-
-  /* Draw current value */
-  glPushMatrix();
-  glTranslated(0, currentPosPx, 0);
-
-  glRasterPos2i(0, gradLabelYOffset);
-  printText("%.0f", currentValue);
-
-  glTranslated(40, 0, 0);
-
-  glBegin(GL_TRIANGLES);
-  glVertex2i(10, 0);
-  glVertex2i(0, -5);
-  glVertex2i(0, 5);
-  glEnd();
-
-  glPopMatrix();
-}
-
-void drawHUDSeparator()
-{
-  glColor3f(0.0, 1.0, 0.0);
-
-  glBegin(GL_LINES);
-  glVertex2i(0, 0);
-  glVertex2i(150, 0);
-  glEnd();
-}
-
-void drawHUD()
-{
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
-
-  glTranslated(50, 0, 0);
-
-  glTranslated(0, glutGet(GLUT_WINDOW_HEIGHT) * 0.1, 0);
-
-  glColor3f(0.0, 1.0, 0.0);
-
-  glRasterPos2i(0, 120);
-  printStatus("[V] V-SYNC: ", vsyncIsAvailable(&app.vsyncController), vsyncIsEnabled(&app.vsyncController));
-  printStatus("[G] G-SYNC: ", gsyncIsAvailable(&app.gsyncController), gsyncIsAllowed(&app.gsyncController));
-  printText("\n");
-  printText("[UP] / [DOWN] Max frame rate: %i\n", app.frameRateController.frameRateMax);
-  printText("[PGUP] / [PGDOWN] Min frame rate: %i\n", app.frameRateController.frameRateMin);
-  printText("[Q] / [ESC] Quit");
-
-  glTranslated(0, 180, 0);
-
-  drawHUDSeparator();
-
-  glTranslated(0, 60, 0);
-
-  drawGauge(glutGet(GLUT_WINDOW_HEIGHT) * 0.8 - 240,
-            app.frameRateController.frameRateMin,
-            app.frameRateController.frameRateMax,
-            10,
-            app.frameRateController.currentSimulatedFrameRate);
-}
-
-/**
-* GLUT's reshape callback function.
-* Update the viewport and the projection matrix.
-*/
-void reshape(int width, int height)
-{
-  if (height == 0)
-  {
-    height = 1;
-  }
-
-  glViewport(0, 0, (GLsizei)width, (GLsizei)height);
-
-  glMatrixMode(GL_PROJECTION);
-  glLoadIdentity();
-  glOrtho(0, width, 0, height, -1.0f, 1.0f);
-
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
-
-  glutPostRedisplay();
-}
-
-/**
-* GLUT's timer callback function.
-* Force redraw of the main OpenGL scene.
-*/
-void timerCallBack(int value)
-{
-  updateClock(&app.clock);
-  computeNextFrameDelayMsec(&app.frameRateController, app.clock.currentTimeSec);
-
-  /* Register next redraw */
-  glutTimerFunc(app.frameRateController.nextFrameDelaySec * 1000, timerCallBack, value);
-
-  /* Redraw scene */
-  glutPostRedisplay();
-}
-
-/**
-* GLUT's display callback function.
-* Render the main OpenGL scene.
-*/
-void display()
-{
-  glClear(GL_COLOR_BUFFER_BIT);
-
-  drawScene();
-  drawHUD();
-
-  glutSwapBuffers();
-}
-
-/**
-* GLUT's Key press callback function.
-* Called when user press a key.
-*/
-void keyPress(unsigned char key, int x, int y)
-{
-  switch (key)
-  {
-  case 27: /* Escape */
-  case 'q': glutLeaveMainLoop();
-    break;
-  case 'v': toggleVSync(&app);
-    break;
-  case 'g': toggleGSync(&app);
-    break;
-  }
-}
-
-/**
-* GLUT's Key press callback function.
-* Called when user press a special key.
-*/
-void specialKeyPress(int key, int x, int y)
-{
-  switch (key)
-  {
-  case GLUT_KEY_UP: increaseMaxFrameRate(&app.frameRateController, 10);
-    break;
-  case GLUT_KEY_DOWN: decreaseMaxFrameRate(&app.frameRateController, 10);
-    break;
-  case GLUT_KEY_PAGE_UP: increaseMinFrameRate(&app.frameRateController, 10);
-    break;
-  case GLUT_KEY_PAGE_DOWN: decreaseMinFrameRate(&app.frameRateController, 10);
-    break;
-  }
-}
-
-#endif
 
 int main(int, char**)
 {
-  // Init deps
   /* Application initialization */
   SDL_Init(SDL_INIT_VIDEO);
-
-  // Time the rectangle will travel to the edge in second
-  // the bigger value the slower it will move.
-
-
-  // TODO Query available displays and their features
-  // SDL_DisplayID displayID;
-  // const SDL_DisplayMode *displayMode = SDL_GetCurrentDisplayMode();
 
   uint32_t windowFlags = SDL_WINDOW_VULKAN /*| SDL_WINDOW_FULLSCREEN */;
   SDL_Window* window = SDL_CreateWindow(
@@ -498,9 +368,13 @@ int main(int, char**)
     return -1;
   }
 
-  FrameContext frameCtx;
+  const double refreshRateHz = queryRefreshRateHz(window);
+  if (refreshRateHz > 1.0)
+    fmt::print("Display refresh rate {:.3f} Hz (default max fps)\n", refreshRateHz);
+  else
+    fmt::print("Could not query refresh rate, default max fps 60\n");
 
-  MyAppl app(window);
+  MyAppl app(window, refreshRateHz);
 
   app.init();
   app.run();

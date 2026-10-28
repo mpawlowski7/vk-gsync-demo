@@ -1,10 +1,16 @@
 #include "vulkan_context.hpp"
+#ifndef _WIN32
 #include <X11/Xlib.h>
+#endif
+
+#include <cstdio>
+#ifdef _WIN32
+#include <cstring>
+#endif
 
 #include "shaders/rectangle_frag.spv.h"
 #include "shaders/rectangle_vert.spv.h"
 
-#include <fmt/core.h>
 #include <fmt/format.h>
 
 
@@ -26,10 +32,13 @@
 // Helper structs
 //
 
-typedef struct Position_t
+namespace
 {
-    float x;
-} Position;
+    struct Position
+    {
+        float x;
+    };
+}
 
 static Position delta = {0.0f};
 
@@ -37,7 +46,7 @@ static Position delta = {0.0f};
 // Function declaration
 //
 
-auto format_as(VkResult result) { return fmt::underlying(result); }
+static auto format_as(VkResult result) { return fmt::underlying(result); }
 #if VULKAN_DEBUG
   static PFN_vkCreateDebugReportCallbackEXT SDL2_vkCreateDebugReportCallbackEXT;
 #endif
@@ -53,6 +62,13 @@ auto format_as(VkResult result) { return fmt::underlying(result); }
 VulkanContext::VulkanContext(SDL_Window *sdlWindow, int width, int height)
     : m_outWidth(width), m_outHeight(height)
 {
+#ifdef _WIN32
+    m_enabledInstanceExt = {
+        VK_KHR_SURFACE_EXTENSION_NAME,
+        "VK_KHR_win32_surface",
+        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
+    };
+#else
     m_enabledInstanceExt = {
         VK_KHR_SURFACE_EXTENSION_NAME,
         VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
@@ -65,6 +81,7 @@ VulkanContext::VulkanContext(SDL_Window *sdlWindow, int width, int height)
     #endif
         VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
     };
+#endif
 
     m_enabledDeviceExt = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME
@@ -123,7 +140,7 @@ void VulkanContext::Update(float position)
     delta.x = position;
 }
 
-void VulkanContext::Draw()
+void VulkanContext::Draw() const
 {
     VkClearValue clearValue = {0.2f, 0.2f, 0.2f, 1.0f};
 
@@ -254,6 +271,43 @@ bool VulkanContext::initVulkanCore()
         return false;
     }
 
+#ifdef _WIN32
+    {
+        uint32_t layerCount = 0;
+        vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+        std::vector<VkLayerProperties> availableLayers(layerCount);
+        if (layerCount != 0) {
+            vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+        }
+
+        std::vector<const char*> presentLayers;
+        for (const char* wanted : m_enabledLayers) {
+            for (const auto& layer : availableLayers) {
+                if (std::strcmp(layer.layerName, wanted) == 0) {
+                    presentLayers.push_back(wanted);
+                    break;
+                }
+            }
+        }
+        m_enabledLayers = std::move(presentLayers);
+
+#if VULKAN_DEBUG
+        uint32_t extensionCount = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
+        std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+        if (extensionCount != 0) {
+            vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, availableExtensions.data());
+        }
+        for (const auto& extension : availableExtensions) {
+            if (std::strcmp(extension.extensionName, VK_EXT_DEBUG_REPORT_EXTENSION_NAME) == 0) {
+                m_enabledInstanceExt.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
+                break;
+            }
+        }
+#endif
+    }
+#endif
+
     VkApplicationInfo appInfo = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pNext = VK_NULL_HANDLE,
@@ -268,7 +322,10 @@ bool VulkanContext::initVulkanCore()
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pNext = VK_NULL_HANDLE,
         .pApplicationInfo = &appInfo,
-#if VULKAN_DEBUG
+#ifdef _WIN32
+        .enabledLayerCount = static_cast<uint32_t>(m_enabledLayers.size()),
+        .ppEnabledLayerNames = m_enabledLayers.empty() ? nullptr : m_enabledLayers.data(),
+#elif VULKAN_DEBUG
         .ppEnabledLayerNames = m_enabledLayers.data(),
 #endif
         .enabledExtensionCount = static_cast<uint32_t>(m_enabledInstanceExt.size()),
@@ -277,12 +334,33 @@ bool VulkanContext::initVulkanCore()
 
     VkResult result = vkCreateInstance(&instanceInfo, VK_NULL_HANDLE, &m_instance);
     if (result != VK_SUCCESS) {
-        fmt::print("Failed to create Vulkan instance. Result = %d\n", result);
+        fmt::print("Failed to create Vulkan instance. Result = {}\n", result);
         return false;
     }
 
 #if VULKAN_DEBUG
-    SDL2_vkCreateDebugReportCallbackEXT = (PFN_vkCreateDebugReportCallbackEXT) SDL_Vulkan_GetVkGetInstanceProcAddr();
+#ifdef _WIN32
+    auto vkGetInstanceProcAddrFn = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
+    SDL2_vkCreateDebugReportCallbackEXT = vkGetInstanceProcAddrFn
+        ? reinterpret_cast<PFN_vkCreateDebugReportCallbackEXT>(
+              vkGetInstanceProcAddrFn(m_instance, "vkCreateDebugReportCallbackEXT"))
+        : nullptr;
+    if (SDL2_vkCreateDebugReportCallbackEXT == nullptr) {
+        fmt::print("Debug report callback is unavailable; continuing without it.\n");
+    } else {
+        VkDebugReportCallbackCreateInfoEXT debugCallbackCreateInfo = {
+            .sType = VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT,
+            .flags = VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT,
+            .pfnCallback = vulkanDebugCallback,
+        };
+
+        result = SDL2_vkCreateDebugReportCallbackEXT(m_instance, &debugCallbackCreateInfo, VK_NULL_HANDLE, &m_debugCallbackEXT);
+        if (result != VK_SUCCESS) {
+            fmt::print("Failed to create debug callback.\n");
+        }
+    }
+#else
+    SDL2_vkCreateDebugReportCallbackEXT = reinterpret_cast<PFN_vkCreateDebugReportCallbackEXT>(SDL_Vulkan_GetVkGetInstanceProcAddr());
 
     VkDebugReportCallbackCreateInfoEXT debugCallbackCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT,
@@ -296,6 +374,7 @@ bool VulkanContext::initVulkanCore()
       return false;
     }
 #endif
+#endif
 
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, VK_NULL_HANDLE);
@@ -303,8 +382,8 @@ bool VulkanContext::initVulkanCore()
         return false;
     }
 
-    VkPhysicalDevice deviceList[deviceCount];
-    vkEnumeratePhysicalDevices(m_instance, &deviceCount, deviceList);
+    std::vector<VkPhysicalDevice> deviceList(deviceCount);
+    vkEnumeratePhysicalDevices(m_instance, &deviceCount, deviceList.data());
 
     m_physicalDevice = deviceList[0];
 
@@ -382,7 +461,7 @@ bool VulkanContext::initSwapchain()
             fmt::print("Failed to open X display\n");
             return 1;
         } else {
-            fmt::print("X display opened %p \n", dpy);
+            fmt::print("X display opened {} \n", fmt::ptr(dpy));
         }
 
         uint32_t displayCount;
@@ -391,15 +470,15 @@ bool VulkanContext::initSwapchain()
         VkDisplayPropertiesKHR displayProperties[displayCount];
         vkGetPhysicalDeviceDisplayPropertiesKHR(m_physicalDevice, &displayCount, displayProperties);
 
-        fmt::print( "Found displays = %d\n", displayCount);
+        fmt::print("Found displays = {}\n", displayCount);
         for (int i=0; i < displayCount; i++) {
-            fmt::print("\t[%d] {} \n", i, displayProperties[i].displayName);
+            fmt::print("\t[{}] {}\n", i, displayProperties[i].displayName);
         }
 
         VkDisplayKHR selectedDisplay = displayProperties[0].display;
         VkResult result = pfn_vkAcquireXlibDisplayEXT(m_physicalDevice, dpy, selectedDisplay);
         if (result != VK_SUCCESS) {
-            fmt::print("Failed to acquire display result = %d \n", result);
+            fmt::print("Failed to acquire display result = {}\n", result);
             return false;
         }
 
@@ -426,7 +505,7 @@ bool VulkanContext::initSwapchain()
         {
             m_swapchainExtent.width = selectedMode.parameters.visibleRegion.width;
             m_swapchainExtent.height = selectedMode.parameters.visibleRegion.height;
-            fmt::print("swapchainExtent.width = %d, swapchainExtent.height = %d\n",
+            fmt::print("swapchainExtent.width = {}, swapchainExtent.height = {}\n",
               m_swapchainExtent.width, m_swapchainExtent.height);
         }
 
@@ -500,7 +579,7 @@ bool VulkanContext::initSwapchain()
 
         result = vkCreateDisplayPlaneSurfaceKHR(m_instance, &displaySurfaceInfo, VK_NULL_HANDLE, &m_surface);
         if (result != VK_SUCCESS) {
-            fmt::print("Failed to create display plane surface result = %d \n", result);
+            fmt::print("Failed to create display plane surface result = {}\n", result);
             return false;
         }
     }
@@ -521,7 +600,7 @@ bool VulkanContext::initSwapchain()
         m_surface,
         &m_surfaceCapabilities);
     if (result != VK_SUCCESS) {
-        fmt::print("Failed to get surface capabilites = %d\n", result);
+        fmt::print("Failed to get surface capabilites = {}\n", result);
         return false;
     }
 
@@ -529,8 +608,8 @@ bool VulkanContext::initSwapchain()
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &surfaceFormatsCount, VK_NULL_HANDLE);
 
     int surfaceFormatIndex = 0;
-    VkSurfaceFormatKHR surfaceFormats[surfaceFormatsCount];
-    vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &surfaceFormatsCount, surfaceFormats);
+    std::vector<VkSurfaceFormatKHR> surfaceFormats(surfaceFormatsCount);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(m_physicalDevice, m_surface, &surfaceFormatsCount, surfaceFormats.data());
 
     for (int i = 0; i < surfaceFormatsCount; i++) {
         if (surfaceFormats[i].format == VK_FORMAT_B8G8R8A8_UNORM) {
@@ -553,6 +632,47 @@ bool VulkanContext::initSwapchain()
         imageCount = m_surfaceCapabilities.maxImageCount;
     }
 
+#ifdef _WIN32
+    /* Win32 reports the drawable size in currentExtent, including DPI scale.
+       0xFFFFFFFF means the app must choose an extent inside min/max. */
+    if (m_surfaceCapabilities.currentExtent.width != 0xFFFFFFFFu &&
+        m_surfaceCapabilities.currentExtent.width != 0 &&
+        m_surfaceCapabilities.currentExtent.height != 0) {
+        m_swapchainExtent = m_surfaceCapabilities.currentExtent;
+    } else {
+        int pixelW = m_outWidth;
+        int pixelH = m_outHeight;
+        SDL_GetWindowSizeInPixels(m_sdlWindow, &pixelW, &pixelH);
+
+        const uint32_t minW = m_surfaceCapabilities.minImageExtent.width;
+        const uint32_t maxW = m_surfaceCapabilities.maxImageExtent.width;
+        const uint32_t minH = m_surfaceCapabilities.minImageExtent.height;
+        const uint32_t maxH = m_surfaceCapabilities.maxImageExtent.height;
+        uint32_t width = pixelW > 0 ? static_cast<uint32_t>(pixelW) : minW;
+        uint32_t height = pixelH > 0 ? static_cast<uint32_t>(pixelH) : minH;
+        if (width < minW) width = minW;
+        if (width > maxW) width = maxW;
+        if (height < minH) height = minH;
+        if (height > maxH) height = maxH;
+        m_swapchainExtent.width = width;
+        m_swapchainExtent.height = height;
+    }
+
+    VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    const VkCompositeAlphaFlagBitsKHR alphaCandidates[] = {
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+        VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+    };
+    for (VkCompositeAlphaFlagBitsKHR candidate : alphaCandidates) {
+        if (m_surfaceCapabilities.supportedCompositeAlpha & candidate) {
+            compositeAlpha = candidate;
+            break;
+        }
+    }
+#endif
+
     VkSwapchainCreateInfoKHR swapchainInfo = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface = m_surface,
@@ -564,14 +684,18 @@ bool VulkanContext::initSwapchain()
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .preTransform = m_surfaceCapabilities.currentTransform,
+#ifdef _WIN32
+        .compositeAlpha = compositeAlpha,
+#else
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+#endif
         .presentMode = VK_PRESENT_MODE_FIFO_KHR, // V-SYNC -> expose to enable/disable
         .clipped = VK_TRUE
 }   ;
 
     result = vkCreateSwapchainKHR(m_device, &swapchainInfo, VK_NULL_HANDLE, &m_swapchain);
     if (result != VK_SUCCESS) {
-        fmt::print("Failed to create swapchain result = %d\n", result);
+        fmt::print("Failed to create swapchain result = {}\n", result);
         return false;
     }
 
@@ -610,7 +734,7 @@ bool VulkanContext::initSwapchain()
 
             result = vkCreateImageView(m_device, &colorInfo, VK_NULL_HANDLE, &m_colorImageViews[i]);
             if (result != VK_SUCCESS) {
-                fmt::print("Failed to create image view for image index: %d \n", i);
+                fmt::print("Failed to create image view for image index: {}\n", i);
                 return false;
             }
         }
@@ -667,8 +791,6 @@ bool VulkanContext::createFramebuffers()
 {
     fmt::print("{} called\n", __func__);
 
-    VkResult result;
-
     VkFramebufferCreateInfo framebufferInfo = {
         .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
         .renderPass = m_renderPass,
@@ -681,7 +803,7 @@ bool VulkanContext::createFramebuffers()
     m_framebuffers.resize(m_swapchainImageCount);
     for (int i = 0; i < m_swapchainImageCount; i++) {
         framebufferInfo.pAttachments = &m_colorImageViews[i];
-        result = vkCreateFramebuffer(m_device, &framebufferInfo, VK_NULL_HANDLE, &m_framebuffers[i]);
+        VkResult result = vkCreateFramebuffer(m_device, &framebufferInfo, VK_NULL_HANDLE, &m_framebuffers[i]);
         if (result != VK_SUCCESS) {
             fmt::print("Failed to create framebuffer\n");
             return false;
@@ -730,13 +852,11 @@ bool VulkanContext::createSyncObjects()
 {
     fmt::print("{} called\n", __func__);
 
-    VkResult result;
-
     VkSemaphoreCreateInfo semaphoreCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
     };
 
-    result = vkCreateSemaphore(m_device, &semaphoreCreateInfo, VK_NULL_HANDLE, &m_presentSemaphore);
+    VkResult result = vkCreateSemaphore(m_device, &semaphoreCreateInfo, VK_NULL_HANDLE, &m_presentSemaphore);
     if (result != VK_SUCCESS) {
         fmt::print("Failed to create present semaphore.\n");
         return false;

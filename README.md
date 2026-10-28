@@ -14,30 +14,40 @@ and/or distros.
 Propertiary NVIDIA driver is probably also needed. I did not tested it with NVK.
 
 ## Dependencies
-* Vulkan 1.0
-* SDL2
-* X11 dev libs
-* Nvidia settings (for UI and GSYNC settings)
 
-Ubuntu install dependencies with the following command:
+fmt 12.2.0 and SDL 3.4.18 are vendored as git submodules under `deps/`. After a fresh clone:
 
 ```
-sudo apt install libsdl2-dev libxnvctrl-dev libvulkan-dev
+git submodule update --init --recursive
 ```
+
+Vulkan is the remaining external dependency (loader + headers).
+
+Linux:
+
+```
+sudo apt install cmake ninja-build build-essential pkg-config libvulkan-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxkbcommon-dev libwayland-dev wayland-protocols libdrm-dev libgbm-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libudev-dev libdbus-1-dev libdecor-0-dev
+```
+
+Windows:
+
+* CMake 4+ and Ninja
+* A C++20 compiler (Visual Studio 2022 with the x64 toolchain, or MinGW)
+* LunarG Vulkan SDK, with `VULKAN_SDK` set in the environment
+
+The Linux build still creates the Vulkan surface through the existing X11/Wayland path. The Windows build uses `VK_KHR_win32_surface` instead. Nvidia control panel / G-SYNC settings are still required to observe VRR.
 
 ## Build and run instructions
 
-In project's root directory, type:
+From the project root, with Ninja:
 
-``
-make
-``
+```
+cmake -S . -B out/debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build out/debug
+./out/debug/vk-gsync-demo
+```
 
-And then tun
-
-``
-./vl-gsync-demo
-``
+On Windows, run that from a shell where the compiler and `VULKAN_SDK` are available (for MSVC, the x64 Native Tools prompt). The executable is `out\debug\vk-gsync-demo.exe`. CMake copies `SDL3.dll` next to it.
 
 #### TODO
 * use VK_EXT_shader_object instead of graphic pipeline.

@@ -1,3 +1,5 @@
 *~
 *.o
 gl-gsync-demo
+out/
+build/

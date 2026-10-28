@@ -4,11 +4,26 @@
 #define VULKAN_DEBUG 1
 #define APP_NAME "vk-gsync-demo"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef VK_USE_PLATFORM_WIN32_KHR
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
+#endif
+
 #include <vector>
 
 #include <SDL3/SDL_vulkan.h>
-// #include <vulkan/vulkan.h>
+#ifdef _WIN32
+#include <vulkan/vulkan.h>
+#else
 #include <vulkan/vulkan.hpp>
+#endif
 
 class VulkanContext
 {
@@ -17,7 +32,7 @@ public:
     VulkanContext(SDL_Window *window, int width, int height);
     // TODO move to scene like class not related to vulkan
     void Update(float position);
-    void Draw();
+    void Draw() const;
 
 private:
     bool InitVulkan();
