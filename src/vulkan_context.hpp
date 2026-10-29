@@ -25,6 +25,9 @@
 #include <vulkan/vulkan.hpp>
 #endif
 
+// Vulkan 1.4 context. Drawing uses dynamic rendering (core since 1.3) and
+// VK_EXT_shader_object instead of a render pass, framebuffer, and graphics
+// pipeline. vulkan_context.cpp comments the difference from that 1.0 path.
 class VulkanContext
 {
 public:
@@ -41,17 +44,20 @@ private:
     bool initVulkanCore();
     bool initLogicalDevice();
     bool initSwapchain();
-    bool createRenderPass();
-    bool createFramebuffers();
     bool createSyncObjects();
-    bool createGraphicsPipeline();
+    bool createShaderObjects();
     bool createCommandBuffers();
     void drawRectangle() const;
-
-    // Utils
-    bool prepareShaderModule(const uint32_t *shaderBinary,
-                             uint32_t shaderSize,
-                             VkShaderModule *pShaderModule) const;
+    // Fixed-function state that a graphics pipeline used to bake in.
+    void setShaderObjectDynamicState() const;
+    // Replaces the render pass initialLayout/finalLayout transitions.
+    void transitionColorImage(VkImage image,
+                              VkImageLayout oldLayout,
+                              VkImageLayout newLayout) const;
+    // libvulkan does not export device-extension commands. Load them after
+    // vkCreateDevice or the link fails (undefined reference to
+    // vkCmdSetAlphaToOneEnableEXT and the other *EXT entry points).
+    bool loadShaderObjectFunctions();
 
     std::vector<const char*>             m_enabledLayers;
     std::vector<const char*>             m_enabledInstanceExt;
@@ -81,14 +87,34 @@ private:
     std::vector<VkImageView>             m_colorImageViews;
     uint32_t                             m_swapchainImageCount{};
 
-    VkRenderPass                         m_renderPass{};
-    std::vector<VkFramebuffer>           m_framebuffers;
     VkFence                              m_renderFence{};
     VkSemaphore                          m_renderSemaphore{},
                                          m_presentSemaphore{};
 
+    // No VkRenderPass / VkFramebuffer: dynamic rendering names the image view
+    // in vkCmdBeginRendering. No VkPipeline: each stage is a VkShaderEXT.
+    // The layout stays. Shader objects replace the pipeline, not the object
+    // push constants are addressed through.
     VkPipelineLayout                     m_pipelineLayout{};
-    VkPipeline                           m_pipeline{};
+    VkShaderEXT                          m_vertexShader{};
+    VkShaderEXT                          m_fragmentShader{};
+
+    // Resolved with vkGetDeviceProcAddr. Core 1.3 commands stay direct calls.
+    struct ShaderObjectFns {
+        PFN_vkCreateShadersEXT                 vkCreateShadersEXT{};
+        PFN_vkDestroyShaderEXT                 vkDestroyShaderEXT{};
+        PFN_vkCmdBindShadersEXT                vkCmdBindShadersEXT{};
+        PFN_vkCmdSetVertexInputEXT             vkCmdSetVertexInputEXT{};
+        PFN_vkCmdSetPolygonModeEXT             vkCmdSetPolygonModeEXT{};
+        PFN_vkCmdSetRasterizationSamplesEXT    vkCmdSetRasterizationSamplesEXT{};
+        PFN_vkCmdSetSampleMaskEXT              vkCmdSetSampleMaskEXT{};
+        PFN_vkCmdSetAlphaToCoverageEnableEXT   vkCmdSetAlphaToCoverageEnableEXT{};
+        PFN_vkCmdSetAlphaToOneEnableEXT        vkCmdSetAlphaToOneEnableEXT{};
+        PFN_vkCmdSetLogicOpEnableEXT           vkCmdSetLogicOpEnableEXT{};
+        PFN_vkCmdSetColorBlendEnableEXT        vkCmdSetColorBlendEnableEXT{};
+        PFN_vkCmdSetColorBlendEquationEXT      vkCmdSetColorBlendEquationEXT{};
+        PFN_vkCmdSetColorWriteMaskEXT          vkCmdSetColorWriteMaskEXT{};
+    } m_fns;
 
 
     SDL_Window                          *m_sdlWindow = nullptr;

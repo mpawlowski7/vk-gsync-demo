@@ -4,7 +4,10 @@ This demo can be used to verify if the VRR (GSync) is working. The it is using S
 create a fullscreen window. It's meant to run on X11 and not Wayland. 
 
 The position of the rectangle is delivered to the vertex shader through push constant. The framerate 
-changes autmatically in range from 30 to <max_refresh_rate>. 
+changes autmatically in range from 30 to <max_refresh_rate>.
+
+Rendering uses Vulkan 1.4 dynamic rendering (`vkCmdBeginRendering`) and
+`VK_EXT_shader_object` instead of a render pass and a graphics pipeline. 
 
 Shaders are embedded into the binary. It was possible thanks to [bin2header](https://github.com/AntumDeluge/bin2header) 
 
@@ -50,7 +53,6 @@ cmake --build out/debug
 On Windows, run that from a shell where the compiler and `VULKAN_SDK` are available (for MSVC, the x64 Native Tools prompt). The executable is `out\debug\vk-gsync-demo.exe`. CMake copies `SDL3.dll` next to it.
 
 #### TODO
-* use VK_EXT_shader_object instead of graphic pipeline.
 * OpenGL for GUI - same as in original project.
 * VSync toggle
 

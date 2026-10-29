@@ -4,15 +4,40 @@
 #endif
 
 #include <cstdio>
-#ifdef _WIN32
 #include <cstring>
-#endif
+#include <type_traits>
 
 #include "shaders/rectangle_frag.spv.h"
 #include "shaders/rectangle_vert.spv.h"
 
 #include <fmt/format.h>
 
+// Rendering model (Vulkan 1.4)
+//
+// Two Vulkan 1.0 objects this demo used to create are gone. The comments at
+// the call sites below spell out what replaced each one.
+//
+// 1. Render pass + framebuffer  vs  dynamic rendering
+//    A VkRenderPass baked attachment formats, load/store ops, and the
+//    initialLayout -> finalLayout transition. A VkFramebuffer then tied that
+//    pass to concrete image views, and drawing started with
+//    vkCmdBeginRenderPass. VK_KHR_dynamic_rendering was promoted in Vulkan 1.3
+//    and is still the core path in 1.4: vkCmdBeginRendering describes the
+//    attachment in the command buffer. There is no render pass and no
+//    framebuffer. Dynamic rendering also does not transition layouts, so the
+//    old initialLayout/finalLayout pair is now an explicit image barrier on
+//    either side of the rendering scope.
+//
+// 2. Graphics pipeline  vs  shader objects
+//    vkCreateGraphicsPipelines linked the SPIR-V, the fixed-function state, and
+//    a compatible render pass into one VkPipeline, bound with vkCmdBindPipeline.
+//    Any change of state meant another pipeline. VK_EXT_shader_object (still an
+//    extension in 1.4, not core) compiles each stage into a VkShaderEXT and
+//    binds it with vkCmdBindShadersEXT. Nothing here calls
+//    vkCreateGraphicsPipelines. State that used to be baked is set with
+//    vkCmdSet* before the draw. A VkPipelineLayout is still created: shader
+//    objects replace the graphics pipeline, not the layout push constants are
+//    addressed through.
 
 // Definitions
 //
@@ -62,11 +87,12 @@ static auto format_as(VkResult result) { return fmt::underlying(result); }
 VulkanContext::VulkanContext(SDL_Window *sdlWindow, int width, int height)
     : m_outWidth(width), m_outHeight(height)
 {
+    // VK_KHR_get_physical_device_properties2 is core since Vulkan 1.1, so it is
+    // not listed. The instance requests 1.4 below.
 #ifdef _WIN32
     m_enabledInstanceExt = {
         VK_KHR_SURFACE_EXTENSION_NAME,
         "VK_KHR_win32_surface",
-        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
     };
 #else
     m_enabledInstanceExt = {
@@ -79,7 +105,6 @@ VulkanContext::VulkanContext(SDL_Window *sdlWindow, int width, int height)
         VK_EXT_DIRECT_MODE_DISPLAY_EXTENSION_NAME,
         VK_EXT_ACQUIRE_XLIB_DISPLAY_EXTENSION_NAME,
     #endif
-        VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME
     };
 #endif
 
@@ -112,15 +137,11 @@ bool VulkanContext::InitVulkan()
         return false;
     }
 
-    if (!createRenderPass()) {
-        return false;
-    }
-
-    if (!createGraphicsPipeline()) {
-        return false;
-    }
-
-    if (!createFramebuffers()) {
+    // Previously: createRenderPass(), createGraphicsPipeline(), createFramebuffers().
+    // Dynamic rendering has no pass or framebuffer, and shader objects replace
+    // the graphics pipeline. The swapchain image views are consumed directly
+    // by vkCmdBeginRendering.
+    if (!createShaderObjects()) {
         return false;
     }
 
@@ -164,24 +185,52 @@ void VulkanContext::Draw() const
 
     vkBeginCommandBuffer(m_cmdBufferDraw, &beginInfo);
     {
-        VkRenderPassBeginInfo renderPassInfo = {};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        // A render pass transitioned the swapchain image as part of
+        // vkCmdBeginRenderPass (initialLayout UNDEFINED, finalLayout
+        // PRESENT_SRC). Dynamic rendering does not, so the same pair of
+        // transitions is recorded as synchronization2 barriers. UNDEFINED as
+        // the old layout discards whatever present left behind; the load op
+        // below clears, so the previous contents are not needed.
+        transitionColorImage(
+            m_swapchainImages[swapchainImageIndex],
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-        renderPassInfo.renderPass = m_renderPass;
-        renderPassInfo.renderArea.offset.x = 0;
-        renderPassInfo.renderArea.offset.y = 0;
-        renderPassInfo.renderArea.extent = m_swapchainExtent;
-        renderPassInfo.framebuffer = m_framebuffers[swapchainImageIndex];
+        // Replaces VkRenderPassBeginInfo + vkCmdBeginRenderPass. The image
+        // view, layout, and clear are named here instead of being looked up
+        // from a framebuffer compatible with a prebuilt render pass.
+        VkRenderingAttachmentInfo colorAttachment = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = m_colorImageViews[swapchainImageIndex],
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue = clearValue,
+        };
 
-        //connect clear values
-        renderPassInfo.clearValueCount = 1;
-        renderPassInfo.pClearValues = &clearValue;
+        VkRenderingInfo renderingInfo = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .renderArea = {
+                .extent = m_swapchainExtent,
+            },
+            .layerCount = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &colorAttachment,
+        };
 
-        vkCmdBeginRenderPass(m_cmdBufferDraw, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRendering(m_cmdBufferDraw, &renderingInfo);
 
+        // The graphics pipeline used to bind shaders and fixed-function state
+        // together. Those are now separate: state first, then the shader objects.
+        setShaderObjectDynamicState();
         drawRectangle();
 
-        vkCmdEndRenderPass(m_cmdBufferDraw);
+        vkCmdEndRendering(m_cmdBufferDraw);
+
+        transitionColorImage(
+            m_swapchainImages[swapchainImageIndex],
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     }
     vkEndCommandBuffer(m_cmdBufferDraw);
 
@@ -227,14 +276,20 @@ void VulkanContext::CleanupVulkan()
         vkDestroySemaphore(m_device, m_presentSemaphore, VK_NULL_HANDLE);
         vkDestroySemaphore(m_device, m_renderSemaphore, VK_NULL_HANDLE);
         vkDestroyFence(m_device, m_renderFence, VK_NULL_HANDLE);
+        // vkDestroyPipeline / vkDestroyRenderPass / vkDestroyFramebuffer are
+        // gone with the objects they destroyed. Shader objects are destroyed
+        // individually; the layout outlives them only because push constants
+        // still name it. The proc is null if device creation never finished.
+        if (m_fns.vkDestroyShaderEXT != nullptr) {
+            m_fns.vkDestroyShaderEXT(m_device, m_vertexShader, VK_NULL_HANDLE);
+            m_fns.vkDestroyShaderEXT(m_device, m_fragmentShader, VK_NULL_HANDLE);
+        }
         vkDestroyPipelineLayout(m_device, m_pipelineLayout, VK_NULL_HANDLE);
-        vkDestroyPipeline(m_device, m_pipeline, VK_NULL_HANDLE);
         vkDestroyCommandPool(m_device, m_commandPool, VK_NULL_HANDLE);
-        vkDestroyRenderPass(m_device, m_renderPass, VK_NULL_HANDLE);
         vkDestroySwapchainKHR(m_device, m_swapchain, VK_NULL_HANDLE);
 
-        for (int i = 0; i < m_swapchainImageCount; i++) {
-            vkDestroyFramebuffer(m_device, m_framebuffers[i], VK_NULL_HANDLE);
+        for (VkImageView view : m_colorImageViews) {
+            vkDestroyImageView(m_device, view, VK_NULL_HANDLE);
         }
 
         vkDestroyDevice(m_device, VK_NULL_HANDLE);
@@ -315,7 +370,11 @@ bool VulkanContext::initVulkanCore()
         .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
         .pEngineName = "vvv",
         .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-        .apiVersion = VK_API_VERSION_1_0,
+        // Latest core version. Dynamic rendering and synchronization2 have been
+        // core since 1.3; 1.4 is what this demo is written against. Shader
+        // objects are not part of that core version, so the device path enables
+        // VK_EXT_shader_object separately.
+        .apiVersion = VK_API_VERSION_1_4,
     };
 
     VkInstanceCreateInfo instanceInfo = {
@@ -333,6 +392,14 @@ bool VulkanContext::initVulkanCore()
     };
 
     VkResult result = vkCreateInstance(&instanceInfo, VK_NULL_HANDLE, &m_instance);
+    if (result == VK_ERROR_INCOMPATIBLE_DRIVER) {
+        // Dynamic rendering is core in 1.3. Shader objects are an extension on
+        // both 1.3 and 1.4, so a 1.3 loader can still run this path.
+        fmt::print("Vulkan 1.4 instance is unavailable, retrying with Vulkan 1.3.\n");
+        appInfo.apiVersion = VK_API_VERSION_1_3;
+        m_instance = VK_NULL_HANDLE;
+        result = vkCreateInstance(&instanceInfo, VK_NULL_HANDLE, &m_instance);
+    }
     if (result != VK_SUCCESS) {
         fmt::print("Failed to create Vulkan instance. Result = {}\n", result);
         return false;
@@ -417,6 +484,169 @@ bool VulkanContext::initLogicalDevice()
 {
     fmt::print("{} called\n", __func__);
 
+    const uint32_t deviceApi = m_physicalDeviceProperties.apiVersion;
+    fmt::print("Using {} (Vulkan {}.{}.{})\n",
+        m_physicalDeviceProperties.deviceName,
+        VK_VERSION_MAJOR(deviceApi),
+        VK_VERSION_MINOR(deviceApi),
+        VK_VERSION_PATCH(deviceApi));
+
+    // Core dynamic rendering needs Vulkan 1.3. The instance asked for 1.4, but
+    // a 1.4 instance can still enumerate an older device.
+    if (deviceApi < VK_API_VERSION_1_3) {
+        fmt::print("Vulkan 1.3 or newer is required for core dynamic rendering.\n");
+        return false;
+    }
+
+    if (m_queueFamilyProperties.empty() ||
+        (m_queueFamilyProperties[0].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) {
+        fmt::print("Queue family 0 does not support graphics.\n");
+        return false;
+    }
+
+    uint32_t extensionCount = 0;
+    vkEnumerateDeviceExtensionProperties(m_physicalDevice, nullptr, &extensionCount, nullptr);
+    std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+    if (extensionCount != 0) {
+        vkEnumerateDeviceExtensionProperties(
+            m_physicalDevice, nullptr, &extensionCount, availableExtensions.data());
+    }
+
+    auto hasExtension = [&](const char *name) {
+        for (const auto &extension : availableExtensions) {
+            if (std::strcmp(extension.extensionName, name) == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // These were not promoted with Vulkan 1.3/1.4. Dynamic rendering itself
+    // was, so VK_KHR_dynamic_rendering is not enabled as an extension.
+    // extendedDynamicState and extendedDynamicState2 are core commands in 1.3;
+    // their feature bits are still enabled below, without listing the promoted
+    // extension names.
+    const char *requiredExtensions[] = {
+        VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
+        VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME,
+        VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
+    };
+    for (const char *name : requiredExtensions) {
+        if (!hasExtension(name)) {
+            fmt::print("Required device extension {} is not supported.\n", name);
+            return false;
+        }
+        m_enabledDeviceExt.push_back(name);
+    }
+
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT queriedDynamicState3 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+    };
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT queriedVertexInput = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT,
+        .pNext = &queriedDynamicState3,
+    };
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT queriedDynamicState2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT,
+        .pNext = &queriedVertexInput,
+    };
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT queriedDynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
+        .pNext = &queriedDynamicState2,
+    };
+    VkPhysicalDeviceShaderObjectFeaturesEXT queriedShaderObject = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        .pNext = &queriedDynamicState,
+    };
+    VkPhysicalDeviceVulkan13Features queriedVulkan13 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .pNext = &queriedShaderObject,
+    };
+    VkPhysicalDeviceFeatures2 queriedFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &queriedVulkan13,
+    };
+    vkGetPhysicalDeviceFeatures2(m_physicalDevice, &queriedFeatures);
+
+    if (!queriedVulkan13.dynamicRendering || !queriedVulkan13.synchronization2) {
+        fmt::print("dynamicRendering and synchronization2 are required.\n");
+        return false;
+    }
+    if (!queriedShaderObject.shaderObject || !queriedVertexInput.vertexInputDynamicState ||
+        !queriedDynamicState.extendedDynamicState || !queriedDynamicState2.extendedDynamicState2) {
+        fmt::print("shaderObject and dynamic-state features are required.\n");
+        return false;
+    }
+    if (!queriedDynamicState3.extendedDynamicState3PolygonMode ||
+        !queriedDynamicState3.extendedDynamicState3RasterizationSamples ||
+        !queriedDynamicState3.extendedDynamicState3SampleMask ||
+        !queriedDynamicState3.extendedDynamicState3AlphaToCoverageEnable ||
+        !queriedDynamicState3.extendedDynamicState3AlphaToOneEnable ||
+        !queriedDynamicState3.extendedDynamicState3LogicOpEnable ||
+        !queriedDynamicState3.extendedDynamicState3ColorBlendEnable ||
+        !queriedDynamicState3.extendedDynamicState3ColorBlendEquation ||
+        !queriedDynamicState3.extendedDynamicState3ColorWriteMask) {
+        fmt::print("extendedDynamicState3 features required by shader objects are missing.\n");
+        return false;
+    }
+
+    // Enable only the bits this demo sets dynamically. Copying the query
+    // structs into vkCreateDevice would also turn on geometryShader and
+    // tessellationShader when the device supports them, and those stages
+    // would then have to be unbound before every draw.
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT dynamicState3 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+        .extendedDynamicState3PolygonMode = VK_TRUE,
+        .extendedDynamicState3RasterizationSamples = VK_TRUE,
+        .extendedDynamicState3SampleMask = VK_TRUE,
+        .extendedDynamicState3AlphaToCoverageEnable = VK_TRUE,
+        .extendedDynamicState3AlphaToOneEnable = VK_TRUE,
+        .extendedDynamicState3LogicOpEnable = VK_TRUE,
+        .extendedDynamicState3ColorBlendEnable = VK_TRUE,
+        .extendedDynamicState3ColorBlendEquation = VK_TRUE,
+        .extendedDynamicState3ColorWriteMask = VK_TRUE,
+    };
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vertexInput = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT,
+        .pNext = &dynamicState3,
+        .vertexInputDynamicState = VK_TRUE,
+    };
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT dynamicState2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT,
+        .pNext = &vertexInput,
+        .extendedDynamicState2 = VK_TRUE,
+    };
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT dynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
+        .pNext = &dynamicState2,
+        .extendedDynamicState = VK_TRUE,
+    };
+    VkPhysicalDeviceShaderObjectFeaturesEXT shaderObject = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        .pNext = &dynamicState,
+        .shaderObject = VK_TRUE,
+    };
+    VkPhysicalDeviceVulkan13Features vulkan13 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .pNext = &shaderObject,
+        .synchronization2 = VK_TRUE,
+        .dynamicRendering = VK_TRUE,
+    };
+    // Present on a 1.4 device so creation matches the instance version. No 1.4
+    // feature is required: dynamic rendering has been core since 1.3, and
+    // shader objects are still VK_EXT_shader_object.
+    VkPhysicalDeviceVulkan14Features vulkan14 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+        .pNext = &vulkan13,
+    };
+    const bool deviceIsVulkan14 = deviceApi >= VK_API_VERSION_1_4;
+
+    VkPhysicalDeviceFeatures2 features2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = deviceIsVulkan14 ? static_cast<void *>(&vulkan14)
+                                  : static_cast<void *>(&vulkan13),
+    };
+
     float priority = 0.0;
 
     VkDeviceQueueCreateInfo queueInfo = {
@@ -429,6 +659,7 @@ bool VulkanContext::initLogicalDevice()
 
     VkDeviceCreateInfo deviceInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pNext = &features2,
         .flags = 0,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &queueInfo,
@@ -436,17 +667,57 @@ bool VulkanContext::initLogicalDevice()
         .enabledLayerCount =  static_cast<uint32_t>(m_enabledLayers.size()),
         .ppEnabledLayerNames = m_enabledLayers.data(),
 #endif
+        // pEnabledFeatures stays null: the features live in the pNext chain.
+        // Setting both is invalid.
         .enabledExtensionCount = static_cast<uint32_t>(m_enabledDeviceExt.size()),
         .ppEnabledExtensionNames = m_enabledDeviceExt.data(),
     };
 
     VkResult result = vkCreateDevice(m_physicalDevice, &deviceInfo, VK_NULL_HANDLE, &m_device);
     if (result != VK_SUCCESS) {
+        fmt::print("Failed to create logical device. Result = {}\n", result);
         return false;
     }
 
     vkGetDeviceQueue(m_device, 0, 0, &m_presentQueue);
+    if (!loadShaderObjectFunctions()) {
+        vkDestroyDevice(m_device, VK_NULL_HANDLE);
+        m_device = VK_NULL_HANDLE;
+        return false;
+    }
     return true;
+}
+
+bool VulkanContext::loadShaderObjectFunctions()
+{
+    // The loader's export table has core commands (vkCmdBeginRendering,
+    // vkCmdSetCullMode, vkCmdPipelineBarrier2, ...) and WSI. It does not export
+    // VK_EXT_shader_object or VK_EXT_extended_dynamic_state3, so calling
+    // vkCmdSetAlphaToOneEnableEXT directly is an undefined reference. Those
+    // entry points exist only once a device that enabled the extension exists.
+    auto load = [this](auto &fn, const char *name) -> bool {
+        fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(
+            vkGetDeviceProcAddr(m_device, name));
+        if (fn == nullptr) {
+            fmt::print("Failed to load {}\n", name);
+            return false;
+        }
+        return true;
+    };
+
+    return load(m_fns.vkCreateShadersEXT, "vkCreateShadersEXT")
+        && load(m_fns.vkDestroyShaderEXT, "vkDestroyShaderEXT")
+        && load(m_fns.vkCmdBindShadersEXT, "vkCmdBindShadersEXT")
+        && load(m_fns.vkCmdSetVertexInputEXT, "vkCmdSetVertexInputEXT")
+        && load(m_fns.vkCmdSetPolygonModeEXT, "vkCmdSetPolygonModeEXT")
+        && load(m_fns.vkCmdSetRasterizationSamplesEXT, "vkCmdSetRasterizationSamplesEXT")
+        && load(m_fns.vkCmdSetSampleMaskEXT, "vkCmdSetSampleMaskEXT")
+        && load(m_fns.vkCmdSetAlphaToCoverageEnableEXT, "vkCmdSetAlphaToCoverageEnableEXT")
+        && load(m_fns.vkCmdSetAlphaToOneEnableEXT, "vkCmdSetAlphaToOneEnableEXT")
+        && load(m_fns.vkCmdSetLogicOpEnableEXT, "vkCmdSetLogicOpEnableEXT")
+        && load(m_fns.vkCmdSetColorBlendEnableEXT, "vkCmdSetColorBlendEnableEXT")
+        && load(m_fns.vkCmdSetColorBlendEquationEXT, "vkCmdSetColorBlendEquationEXT")
+        && load(m_fns.vkCmdSetColorWriteMaskEXT, "vkCmdSetColorWriteMaskEXT");
 }
 
 bool VulkanContext::initSwapchain()
@@ -743,76 +1014,6 @@ bool VulkanContext::initSwapchain()
     return true;
 }
 
-bool VulkanContext::createRenderPass()
-{
-    fmt::print("{} called\n", __func__);
-
-    // the renderpass will use this color attachment.
-    VkAttachmentDescription colorAttachment = {
-        .format = m_surfaceFormat.format,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-    };
-
-    VkAttachmentReference colorAttachmentReference = {
-        .attachment = 0,
-        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
-
-    VkSubpassDescription subpassDescription = {
-        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = 1,
-        .pColorAttachments = &colorAttachmentReference
-    };
-
-    VkRenderPassCreateInfo renderPassInfo = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &colorAttachment,
-        .subpassCount = 1,
-        .pSubpasses = &subpassDescription
-    };
-
-    VkResult result = vkCreateRenderPass(m_device, &renderPassInfo, VK_NULL_HANDLE, &m_renderPass);
-    if (result != VK_SUCCESS) {
-        fmt::print("Failed to create rectangle renderpass\n");
-        return false;
-    }
-
-    return true;
-}
-
-bool VulkanContext::createFramebuffers()
-{
-    fmt::print("{} called\n", __func__);
-
-    VkFramebufferCreateInfo framebufferInfo = {
-        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-        .renderPass = m_renderPass,
-        .attachmentCount = 1,
-        .width = m_swapchainExtent.width,
-        .height = m_swapchainExtent.height,
-        .layers = 1
-    };
-
-    m_framebuffers.resize(m_swapchainImageCount);
-    for (int i = 0; i < m_swapchainImageCount; i++) {
-        framebufferInfo.pAttachments = &m_colorImageViews[i];
-        VkResult result = vkCreateFramebuffer(m_device, &framebufferInfo, VK_NULL_HANDLE, &m_framebuffers[i]);
-        if (result != VK_SUCCESS) {
-            fmt::print("Failed to create framebuffer\n");
-            return false;
-        }
-    }
-
-    return true;
-}
-
 bool VulkanContext::createCommandBuffers()
 {
     fmt::print("{} called\n", __func__);
@@ -882,105 +1083,15 @@ bool VulkanContext::createSyncObjects()
     return true;
 }
 
-bool VulkanContext::createGraphicsPipeline()
+bool VulkanContext::createShaderObjects()
 {
-    printf("%s called\n", __func__);
+    fmt::print("{} called\n", __func__);
 
-    VkResult result;
-
-    VkShaderModule vert_shader_module;
-    prepareShaderModule(rectangle_vert_spv, sizeof(rectangle_vert_spv), &vert_shader_module);
-
-    VkShaderModule frag_shader_module;
-    prepareShaderModule(rectangle_frag_spv, sizeof(rectangle_frag_spv), &frag_shader_module);
-
-    VkPipelineShaderStageCreateInfo vertShaderStageInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_VERTEX_BIT,
-        .module = vert_shader_module,
-        .pName = "main",
-    };
-
-    VkPipelineShaderStageCreateInfo fragShaderStageInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-        .module = frag_shader_module,
-        .pName = "main"
-    };
-
-    VkPipelineShaderStageCreateInfo shaderStages[] = {
-        vertShaderStageInfo,
-        fragShaderStageInfo
-    };
-
-    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 0,
-        .vertexAttributeDescriptionCount = 0
-    };
-
-    VkPipelineInputAssemblyStateCreateInfo inputAssemblyInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        .primitiveRestartEnable = VK_FALSE
-    };
-
-    // Static viewport and scissors
-    auto vpWidth = static_cast<float>(m_swapchainExtent.width);
-    auto vpHeight = static_cast<float>(m_swapchainExtent.height);
-    VkViewport viewport = {
-        .x = 0.0f,
-        .y = 0.0f,
-        .width = vpWidth,
-        .height = vpHeight,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f
-    };
-
-    VkRect2D scissor = {
-        .extent = m_swapchainExtent
-    };
-
-    VkPipelineViewportStateCreateInfo viewportInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1,
-        .pViewports = &viewport,
-        .scissorCount = 1,
-        .pScissors = &scissor
-    };
-
-    VkPipelineRasterizationStateCreateInfo rasterizerInfo = {
-        .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        .depthClampEnable        = VK_FALSE,
-        .rasterizerDiscardEnable = VK_FALSE,
-        .polygonMode             = VK_POLYGON_MODE_FILL,
-        .cullMode                = VK_CULL_MODE_NONE,
-        .frontFace               = VK_FRONT_FACE_CLOCKWISE,
-        .depthBiasEnable         = VK_FALSE,
-        .lineWidth               = 1.0f
-    };
-
-    VkPipelineMultisampleStateCreateInfo multisamplingInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-        .sampleShadingEnable = VK_FALSE
-    };
-
-    VkPipelineColorBlendAttachmentState colorBlendingAttachment = {
-        .blendEnable    = VK_FALSE,
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
-                          VK_COLOR_COMPONENT_G_BIT |
-                          VK_COLOR_COMPONENT_B_BIT |
-                          VK_COLOR_COMPONENT_A_BIT
-    };
-
-    VkPipelineColorBlendStateCreateInfo colorBlendingInfo = {
-        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .logicOpEnable   = VK_FALSE,
-        .attachmentCount = 1,
-        .pAttachments    = &colorBlendingAttachment
-    };
-
+    // Same push-constant range the graphics pipeline layout used to expose.
+    // It is now also written into each VkShaderCreateInfoEXT. vkCmdPushConstants
+    // still takes a VkPipelineLayout; that layout must be compatible with the
+    // ranges the shader objects were created with. There is no graphics pipeline
+    // behind it.
     VkPushConstantRange pushConstant = {
         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
         .offset = 0,
@@ -993,55 +1104,203 @@ bool VulkanContext::createGraphicsPipeline()
         .pushConstantRangeCount = 1,
         .pPushConstantRanges    = &pushConstant
     };
-    result = vkCreatePipelineLayout(
+    VkResult result = vkCreatePipelineLayout(
         m_device,
         &pipelineLayoutInfo,
         VK_NULL_HANDLE,
         &m_pipelineLayout);
     if (result != VK_SUCCESS) {
-        printf("Failed to create pipeline layout!\n");
-        vkDestroyShaderModule(m_device, frag_shader_module, VK_NULL_HANDLE);
-        vkDestroyShaderModule(m_device, vert_shader_module, VK_NULL_HANDLE);
+        fmt::print("Failed to create pipeline layout. Result = {}\n", result);
         return false;
     }
 
-    VkGraphicsPipelineCreateInfo info = {};
-    info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    info.stageCount = sizeof(shaderStages) / (sizeof(*shaderStages));
-    info.pStages = shaderStages;
-    info.pVertexInputState = &vertexInputInfo;
-    info.pInputAssemblyState = &inputAssemblyInfo;
-    info.pViewportState = &viewportInfo;
-    info.pRasterizationState = &rasterizerInfo;
-    info.pMultisampleState = &multisamplingInfo;
-    info.pColorBlendState = &colorBlendingInfo;
-    info.pDynamicState = VK_NULL_HANDLE;
-    info.layout = m_pipelineLayout;
-    info.renderPass = m_renderPass;
-    info.subpass = 0;
-    info.basePipelineHandle = VK_NULL_HANDLE;
+    // Difference from vkCreateGraphicsPipelines:
+    // - SPIR-V is passed directly. There is no VkShaderModule intermediate.
+    // - No rasterizer, viewport, blend, or render-pass state is attached.
+    //   That state is set per draw in setShaderObjectDynamicState().
+    // - LINK_STAGE promises these two stages are always used together, which
+    //   is the cross-stage optimization a graphics pipeline used to get for
+    //   free. Unlinked shader objects (flags = 0) can instead be mixed across
+    //   draws without building a new pipeline for each combination.
+    VkShaderCreateInfoEXT shaderInfos[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+            .flags = VK_SHADER_CREATE_LINK_STAGE_BIT_EXT,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .nextStage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+            .codeSize = sizeof(rectangle_vert_spv),
+            .pCode = rectangle_vert_spv,
+            .pName = "main",
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushConstant,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+            .flags = VK_SHADER_CREATE_LINK_STAGE_BIT_EXT,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .nextStage = 0,
+            .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+            .codeSize = sizeof(rectangle_frag_spv),
+            .pCode = rectangle_frag_spv,
+            .pName = "main",
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushConstant,
+        },
+    };
 
-    result = vkCreateGraphicsPipelines(
-        m_device,
-        VK_NULL_HANDLE,
-        1,
-        &info,
-        VK_NULL_HANDLE,
-        &m_pipeline);
-
+    VkShaderEXT shaders[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    result = m_fns.vkCreateShadersEXT(m_device, 2, shaderInfos, VK_NULL_HANDLE, shaders);
+    m_vertexShader = shaders[0];
+    m_fragmentShader = shaders[1];
     if (result != VK_SUCCESS) {
-        printf("Failed to create graphics pipeline! result = %d\n", result);
+        fmt::print("Failed to create shader objects. Result = {}\n", result);
+        m_fns.vkDestroyShaderEXT(m_device, m_vertexShader, VK_NULL_HANDLE);
+        m_fns.vkDestroyShaderEXT(m_device, m_fragmentShader, VK_NULL_HANDLE);
+        m_vertexShader = VK_NULL_HANDLE;
+        m_fragmentShader = VK_NULL_HANDLE;
+        vkDestroyPipelineLayout(m_device, m_pipelineLayout, VK_NULL_HANDLE);
+        m_pipelineLayout = VK_NULL_HANDLE;
+        return false;
     }
 
-    vkDestroyShaderModule(m_device, frag_shader_module, VK_NULL_HANDLE);
-    vkDestroyShaderModule(m_device, vert_shader_module, VK_NULL_HANDLE);
+    return true;
+}
 
-    return result == VK_SUCCESS;
+void VulkanContext::setShaderObjectDynamicState() const
+{
+    // A graphics pipeline froze this in VkGraphicsPipelineCreateInfo (viewport
+    // and scissor were not even dynamic). Shader objects have no baked state.
+    // Before vkCmdDraw the spec requires each of these to have been set, even
+    // when the value matches what the old pipeline would have baked and even
+    // when this draw does not use that test (depth, stencil, logic op).
+    const VkViewport viewport = {
+        .width = static_cast<float>(m_swapchainExtent.width),
+        .height = static_cast<float>(m_swapchainExtent.height),
+        .maxDepth = 1.0f,
+    };
+    const VkRect2D scissor = {
+        .extent = m_swapchainExtent,
+    };
+    vkCmdSetViewportWithCount(m_cmdBufferDraw, 1, &viewport);
+    vkCmdSetScissorWithCount(m_cmdBufferDraw, 1, &scissor);
+
+    // No vertex buffers: the rectangle is generated from gl_VertexIndex.
+    // The old pipeline encoded that as empty vertex-input state. Here it is
+    // vkCmdSetVertexInputEXT with zero bindings, called every draw.
+    m_fns.vkCmdSetVertexInputEXT(m_cmdBufferDraw, 0, nullptr, 0, nullptr);
+
+    vkCmdSetPrimitiveTopology(m_cmdBufferDraw, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    vkCmdSetPrimitiveRestartEnable(m_cmdBufferDraw, VK_FALSE);
+    vkCmdSetRasterizerDiscardEnable(m_cmdBufferDraw, VK_FALSE);
+    m_fns.vkCmdSetPolygonModeEXT(m_cmdBufferDraw, VK_POLYGON_MODE_FILL);
+    vkCmdSetCullMode(m_cmdBufferDraw, VK_CULL_MODE_NONE);
+    vkCmdSetFrontFace(m_cmdBufferDraw, VK_FRONT_FACE_CLOCKWISE);
+    vkCmdSetDepthBiasEnable(m_cmdBufferDraw, VK_FALSE);
+    vkCmdSetDepthBias(m_cmdBufferDraw, 0.0f, 0.0f, 0.0f);
+    vkCmdSetLineWidth(m_cmdBufferDraw, 1.0f);
+
+    vkCmdSetDepthTestEnable(m_cmdBufferDraw, VK_FALSE);
+    vkCmdSetDepthWriteEnable(m_cmdBufferDraw, VK_FALSE);
+    vkCmdSetDepthCompareOp(m_cmdBufferDraw, VK_COMPARE_OP_ALWAYS);
+    vkCmdSetDepthBoundsTestEnable(m_cmdBufferDraw, VK_FALSE);
+    vkCmdSetDepthBounds(m_cmdBufferDraw, 0.0f, 1.0f);
+    vkCmdSetStencilTestEnable(m_cmdBufferDraw, VK_FALSE);
+    vkCmdSetStencilOp(m_cmdBufferDraw, VK_STENCIL_FACE_FRONT_AND_BACK,
+                      VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP,
+                      VK_COMPARE_OP_ALWAYS);
+    vkCmdSetStencilCompareMask(m_cmdBufferDraw, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetStencilWriteMask(m_cmdBufferDraw, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+    vkCmdSetStencilReference(m_cmdBufferDraw, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
+
+    m_fns.vkCmdSetRasterizationSamplesEXT(m_cmdBufferDraw, VK_SAMPLE_COUNT_1_BIT);
+    const VkSampleMask sampleMask = 0xFFFFFFFF;
+    m_fns.vkCmdSetSampleMaskEXT(m_cmdBufferDraw, VK_SAMPLE_COUNT_1_BIT, &sampleMask);
+    m_fns.vkCmdSetAlphaToCoverageEnableEXT(m_cmdBufferDraw, VK_FALSE);
+    m_fns.vkCmdSetAlphaToOneEnableEXT(m_cmdBufferDraw, VK_FALSE);
+
+    const VkBool32 blendEnable = VK_FALSE;
+    const VkColorBlendEquationEXT blendEquation = {
+        .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+    };
+    const VkColorComponentFlags writeMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    const float blendConstants[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    m_fns.vkCmdSetLogicOpEnableEXT(m_cmdBufferDraw, VK_FALSE);
+    m_fns.vkCmdSetColorBlendEnableEXT(m_cmdBufferDraw, 0, 1, &blendEnable);
+    m_fns.vkCmdSetColorBlendEquationEXT(m_cmdBufferDraw, 0, 1, &blendEquation);
+    m_fns.vkCmdSetColorWriteMaskEXT(m_cmdBufferDraw, 0, 1, &writeMask);
+    vkCmdSetBlendConstants(m_cmdBufferDraw, blendConstants);
+}
+
+void VulkanContext::transitionColorImage(VkImage image,
+                                         VkImageLayout oldLayout,
+                                         VkImageLayout newLayout) const
+{
+    // synchronization2 (core since 1.3) replaces the old VkImageMemoryBarrier
+    // that a render pass used to hide inside initialLayout/finalLayout.
+    VkPipelineStageFlags2 srcStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkAccessFlags2 srcAccess = VK_ACCESS_2_NONE;
+    VkPipelineStageFlags2 dstStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkAccessFlags2 dstAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+
+    if (newLayout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+        srcAccess = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        // Present is synchronized by the semaphore in vkQueuePresentKHR, not by
+        // a destination access in this barrier. BOTTOM_OF_PIPE is the sync2
+        // stand-in for the old render pass's finalLayout transition.
+        dstStage = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+        dstAccess = VK_ACCESS_2_NONE;
+    }
+
+    const VkImageMemoryBarrier2 barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = srcStage,
+        .srcAccessMask = srcAccess,
+        .dstStageMask = dstStage,
+        .dstAccessMask = dstAccess,
+        .oldLayout = oldLayout,
+        .newLayout = newLayout,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    const VkDependencyInfo dependency = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &barrier,
+    };
+    vkCmdPipelineBarrier2(m_cmdBufferDraw, &dependency);
 }
 
 void VulkanContext::drawRectangle() const
 {
-    vkCmdBindPipeline(m_cmdBufferDraw, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+    // vkCmdBindPipeline bound every stage and the baked state at once.
+    // vkCmdBindShadersEXT binds stages only. Geometry and tessellation are
+    // left unset on purpose: those features are not enabled, so the spec does
+    // not require a NULL bind for them.
+    const VkShaderStageFlagBits stages[2] = {
+        VK_SHADER_STAGE_VERTEX_BIT,
+        VK_SHADER_STAGE_FRAGMENT_BIT,
+    };
+    const VkShaderEXT shaders[2] = {
+        m_vertexShader,
+        m_fragmentShader,
+    };
+    m_fns.vkCmdBindShadersEXT(m_cmdBufferDraw, 2, stages, shaders);
 
     vkCmdPushConstants(
         m_cmdBufferDraw,
@@ -1051,22 +1310,4 @@ void VulkanContext::drawRectangle() const
         sizeof(Position),
         &delta);
     vkCmdDraw(m_cmdBufferDraw, 6, 1, 0, 0);
-}
-
-bool VulkanContext::prepareShaderModule(const uint32_t *shaderBinary, uint32_t shaderSize,
-                                        VkShaderModule *pShaderModule) const
-{
-    VkShaderModuleCreateInfo shaderInfo = {
-        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = shaderSize,
-        .pCode = shaderBinary
-    };
-
-    VkResult result = vkCreateShaderModule(m_device, &shaderInfo, VK_NULL_HANDLE, pShaderModule);
-    if (result != VK_SUCCESS) {
-        printf("Failed to create shader module \n");
-        return false;
-    }
-
-    return true;
 }
